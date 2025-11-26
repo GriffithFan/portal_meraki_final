@@ -2563,9 +2563,9 @@ div[style*='overflowX: auto']::-webkit-scrollbar-thumb:hover {
   }
 }
 
-/* Indicador visual de scroll disponible */
-div[style*="overflowX: 'auto']::after,
-div[style*='overflowX: auto']::after {
+/* Indicador visual cuando un contenedor tiene scroll horizontal */
+div[style*='overflow-x:auto']::after,
+div[style*='overflow-x: auto']::after {
   content: '';
   position: absolute;
   right: 0;
@@ -2578,8 +2578,8 @@ div[style*='overflowX: auto']::after {
   transition: opacity 0.3s ease;
 }
 
-div[style*="overflowX: 'auto'"]:hover::after,
-div[style*='overflowX: auto']:hover::after {
+div[style*='overflow-x:auto']:hover::after,
+div[style*='overflow-x: auto']:hover::after {
   opacity: 1;
 }
 
