@@ -797,7 +797,7 @@ export default function SimpleGraph({ graph, devices = [] }) {
   return (
     <svg 
       width="100%" 
-      height="auto"
+      height={layout.height}
       viewBox={viewBox} 
       preserveAspectRatio="xMidYMin meet"
       style={{ display: 'block', maxHeight: `${layout.height}px` }}
