@@ -8,13 +8,30 @@ export default function TopBar({ onSearch, onLogout, onSelectSection, sections =
   const [recentPredios, setRecentPredios] = useState([]);
   const [drawerSearch, setDrawerSearch] = useState('');
   const [windowWidth, setWindowWidth] = useState(typeof window !== 'undefined' ? window.innerWidth : 1200);
-  const [isSearchingBySerial, setIsSearchingBySerial] = useState(false);
+  const [isSearchingDevice, setIsSearchingDevice] = useState(false);
   const inputRef = useRef(null);
   
+  // Detectar si el query parece una MAC address válida
+  const looksLikeMacAddress = (query) => {
+    if (!query) return false;
+    const trimmed = query.trim();
+    if (!trimmed) return false;
+    const patterns = [
+      /^([0-9a-f]{2}:){5}[0-9a-f]{2}$/i,
+      /^([0-9a-f]{2}-){5}[0-9a-f]{2}$/i,
+      /^([0-9a-f]{4}\.){2}[0-9a-f]{4}$/i,
+      /^[0-9a-f]{12}$/i,
+    ];
+    return patterns.some((pattern) => pattern.test(trimmed));
+  };
+
+  const normalizeMac = (value) => (value || '').trim().toLowerCase().replace(/[^0-9a-f]/g, '');
+
   // Detectar si el query parece un serial de dispositivo Meraki
   const looksLikeDeviceSerial = (query) => {
     if (!query || query.length < 4) return false;
     const trimmed = query.trim().toUpperCase();
+    if (looksLikeMacAddress(trimmed)) return false;
     
     // Patrones conocidos de serials Meraki:
     // Q2PD, Q3AJ (Access Points)
@@ -43,41 +60,59 @@ export default function TopBar({ onSearch, onLogout, onSelectSection, sections =
     setShowConfirm(false);
   };
 
+  const searchDeviceByIdentifier = async (query) => {
+    const trimmed = (query || '').trim();
+    if (!trimmed) return { handled: false, found: false };
+
+    const isMac = looksLikeMacAddress(trimmed);
+    const isSerial = !isMac && looksLikeDeviceSerial(trimmed);
+    if (!isMac && !isSerial) return { handled: false, found: false };
+
+    const endpoint = isMac
+      ? `/api/predios/find-by-mac/${encodeURIComponent(normalizeMac(trimmed))}`
+      : `/api/predios/find-by-serial/${encodeURIComponent(trimmed.toUpperCase())}`;
+
+    const identifierLabel = isMac ? `MAC ${trimmed}` : `serial ${trimmed.toUpperCase()}`;
+    let predioFound = false;
+
+    setIsSearchingDevice(true);
+    try {
+      const response = await fetch(endpoint);
+      const data = await response.json();
+
+      if (response.ok && data.success && data.predio) {
+        const predioId = data.predio.predio_code || data.predio.network_id;
+        if (predioId && predioId !== 'UNKNOWN') {
+          onSearch(predioId);
+          predioFound = true;
+        } else {
+          alert('Dispositivo encontrado pero no está asociado a ningún predio registrado.');
+        }
+      } else {
+        const errorMsg = data.error || 'No se encontró el dispositivo';
+        const extraMsg = data.message ? `\n\n${data.message}` : '';
+        alert(`${errorMsg}${extraMsg}`);
+      }
+    } catch (error) {
+      console.error('[TopBar] Error buscando dispositivo:', error);
+      alert(`Error buscando dispositivo con ${identifierLabel}`);
+    } finally {
+      setIsSearchingDevice(false);
+    }
+
+    return { handled: true, found: predioFound };
+  };
+
   const handleSearch = async (e) => {
     e.preventDefault();
     const query = searchQuery.trim();
     if (!query) return;
+
+    const deviceSearchResult = await searchDeviceByIdentifier(query);
+    if (deviceSearchResult.handled) return;
     
-    // Detectar si es búsqueda por serial
-    if (looksLikeDeviceSerial(query)) {
-      setIsSearchingBySerial(true);
-      try {
-        const response = await fetch(`/api/predios/find-by-serial/${encodeURIComponent(query)}`);
-        const data = await response.json();
-        
-        if (response.ok && data.success && data.predio) {
-          // Buscar el predio encontrado usando el código o ID
-          const predioId = data.predio.predio_code || data.predio.network_id;
-          if (predioId && predioId !== 'UNKNOWN') {
-            onSearch(predioId);
-          } else {
-            alert(`Dispositivo encontrado pero no está asociado a ningún predio registrado.`);
-          }
-        } else {
-          const errorMsg = data.error || 'No se encontró el dispositivo';
-          const extraMsg = data.message ? `\n\n${data.message}` : '';
-          alert(`${errorMsg}${extraMsg}`);
-        }
-      } catch (error) {
-        console.error('[TopBar] Error buscando por serial:', error);
-        alert(`Error buscando dispositivo con serial ${query}`);
-      } finally {
-        setIsSearchingBySerial(false);
-      }
-    } else {
-      // Búsqueda normal por código de predio
-      onSearch(query);
-    }
+    // Búsqueda normal por código de predio
+    onSearch(query);
   };
 
   useEffect(() => {
@@ -159,10 +194,10 @@ export default function TopBar({ onSearch, onLogout, onSelectSection, sections =
                   onChange={(e) => setSearchQuery(e.target.value)}
                   placeholder="Buscar predio por ID, nombre o serial de dispositivo..."
                   aria-label="Buscar predio o dispositivo"
-                  disabled={isSearchingBySerial}
+                  disabled={isSearchingDevice}
                 />
-                <button type="submit" className="search-submit" aria-label="Buscar" disabled={isSearchingBySerial}>
-                  {isSearchingBySerial ? (
+                <button type="submit" className="search-submit" aria-label="Buscar" disabled={isSearchingDevice}>
+                  {isSearchingDevice ? (
                     <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#fff" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="spinner">
                       <circle cx="12" cy="12" r="10" strokeDasharray="15 5" />
                     </svg>
@@ -228,37 +263,15 @@ export default function TopBar({ onSearch, onLogout, onSelectSection, sections =
                 e.preventDefault(); 
                 const query = drawerSearch.trim();
                 if (!query) return;
-                
-                // Detectar búsqueda por serial en drawer
-                if (looksLikeDeviceSerial(query)) {
-                  setIsSearchingBySerial(true);
-                  try {
-                    const response = await fetch(`/api/predios/find-by-serial/${encodeURIComponent(query)}`);
-                    const data = await response.json();
-                    
-                    if (response.ok && data.success && data.predio) {
-                      const predioId = data.predio.predio_code || data.predio.network_id;
-                      if (predioId && predioId !== 'UNKNOWN') {
-                        onSearch(predioId);
-                        setShowDrawer(false);
-                      } else {
-                        alert(`Dispositivo encontrado pero no está asociado a ningún predio registrado.`);
-                      }
-                    } else {
-                      const errorMsg = data.error || 'No se encontró';
-                      const extraMsg = data.message ? `\n\n${data.message}` : '';
-                      alert(`${errorMsg}${extraMsg}`);
-                    }
-                  } catch (error) {
-                    console.error('[Drawer] Error buscando por serial:', error);
-                    alert(`Error buscando dispositivo`);
-                  } finally {
-                    setIsSearchingBySerial(false);
-                  }
-                } else {
-                  onSearch(query);
-                  setShowDrawer(false);
+
+                const result = await searchDeviceByIdentifier(query);
+                if (result.handled) {
+                  if (result.found) setShowDrawer(false);
+                  return;
                 }
+
+                onSearch(query);
+                setShowDrawer(false);
               }}>
                 <input
                   type="text"
@@ -267,10 +280,10 @@ export default function TopBar({ onSearch, onLogout, onSelectSection, sections =
                   placeholder="Buscar predio por ID, nombre o serial..."
                   aria-label="Buscar predio o dispositivo en drawer"
                   className="drawer-search-input"
-                  disabled={isSearchingBySerial}
+                  disabled={isSearchingDevice}
                 />
-                <button type="submit" className="drawer-search-button" aria-label="Buscar predio" disabled={isSearchingBySerial}>
-                  {isSearchingBySerial ? (
+                <button type="submit" className="drawer-search-button" aria-label="Buscar predio" disabled={isSearchingDevice}>
+                  {isSearchingDevice ? (
                     <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="spinner">
                       <circle cx="12" cy="12" r="10" strokeDasharray="15 5" />
                     </svg>
@@ -315,10 +328,10 @@ export default function TopBar({ onSearch, onLogout, onSelectSection, sections =
                 placeholder="Buscar predio por ID, nombre o serial..."
                 aria-label="Buscar predio o dispositivo"
                 style={{ flex: 1, padding: '12px 14px', borderRadius: 10, border: '1px solid #cbd5e1', background: '#fff' }}
-                disabled={isSearchingBySerial}
+                disabled={isSearchingDevice}
               />
-              <button type="submit" style={{ background: '#2563eb', color: '#fff', borderRadius: 8, padding: '10px 14px', border: 'none' }} disabled={isSearchingBySerial}>
-                {isSearchingBySerial ? 'Buscando...' : 'Buscar'}
+              <button type="submit" style={{ background: '#2563eb', color: '#fff', borderRadius: 8, padding: '10px 14px', border: 'none' }} disabled={isSearchingDevice}>
+                {isSearchingDevice ? 'Buscando...' : 'Buscar'}
               </button>
               <button type="button" onClick={() => setShowMobileSearch(false)} style={{ background: '#f1f5f9', border: 'none', borderRadius: 8, padding: '10px 12px' }}>Cerrar</button>
             </form>
