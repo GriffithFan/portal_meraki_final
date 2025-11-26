@@ -77,7 +77,7 @@ echo -e "${YELLOW}9. Configurando Nginx...${NC}"
 cat > $NGINX_SITE << 'EOF'
 server {
     listen 80;
-    server_name portalmeraki.info www.portalmeraki.info;
+    server_name portalmeraki.info www.portalmeraki.info 72.61.32.146;
     
     # Servir frontend estático
     location / {
