@@ -85,6 +85,12 @@ server {
         index index.html;
         try_files $uri $uri/ /index.html;
         
+        # No cachear Service Worker ni HTML (CRÍTICO para actualizaciones PWA)
+        location ~* (sw\.js|index\.html)$ {
+            add_header Cache-Control "no-store, no-cache, must-revalidate, proxy-revalidate, max-age=0";
+            expires off;
+        }
+
         # Caché para assets estáticos
         location ~* \.(js|css|png|jpg|jpeg|gif|ico|svg|woff|woff2|ttf|eot)$ {
             expires 1y;
