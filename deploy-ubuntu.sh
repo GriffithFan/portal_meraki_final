@@ -15,9 +15,9 @@ NC='\033[0m' # No Color
 
 # Variables de configuración
 DOMAIN="portalmeraki.info"
-PROJECT_DIR="/home/portal-meraki"
+PROJECT_DIR="/root/portal-meraki-deploy"
 NGINX_SITE="/etc/nginx/sites-available/portal-meraki"
-SERVICE_USER="www-data"
+SERVICE_USER="root"
 
 echo -e "${BLUE}Portal Meraki - Deployment en Ubuntu VPS${NC}"
 echo -e "${BLUE}===============================================${NC}"
@@ -81,7 +81,7 @@ server {
     
     # Servir frontend estático
     location / {
-        root /home/portal-meraki/frontend/dist;
+        root /root/portal-meraki-deploy/frontend/dist;
         index index.html;
         try_files $uri $uri/ /index.html;
         
