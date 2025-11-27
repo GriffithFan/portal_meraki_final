@@ -40,6 +40,7 @@ const { logger } = require('../config/logger');
 
 // Caché y utilidades (importar desde servidor.js o mover a un módulo compartido)
 const { cache, getFromCache, setInCache } = require('../warmCache');
+const { getNetworkSummary: getNetworkSummaryHandler } = require('./networkSummaryController');
 
 const DEFAULT_WIRELESS_TIMESPAN = 3600; // 1 hora
 
@@ -700,10 +701,7 @@ exports.getNetworkSection = async (req, res) => {
 /**
  * Obtener resumen del network (endpoint /summary)
  */
-exports.getNetworkSummary = async (req, res) => {
-  // TODO: Implementar endpoint summary si existe en servidor.js
-  res.status(501).json({ error: 'Endpoint /summary no implementado aún' });
-};
+exports.getNetworkSummary = (req, res) => getNetworkSummaryHandler(req, res);
 
 /**
  * Endpoint legacy /:section (compatibilidad)
