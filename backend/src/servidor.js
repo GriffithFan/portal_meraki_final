@@ -5859,7 +5859,7 @@ app.get('/api/predios/find-by-mac/:mac', async (req, res) => {
       return res.status(500).json({ error: 'No se pudieron obtener las organizaciones' });
     }
 
-    const MAX_CONCURRENCY = Math.min(6, orgs.length);
+    const MAX_CONCURRENCY = Math.min(12, orgs.length);
     let foundNetwork = null;
     let foundDevice = null;
 
