@@ -5839,6 +5839,19 @@ app.get('/api/predios/find-by-mac/:mac', async (req, res) => {
       return res.status(400).json({ error: 'MAC address inválida (debe tener 12 caracteres hexadecimales)' });
     }
 
+    const macParts = mac.match(/.{1,2}/g) || [];
+    const macColonLower = macParts.length ? macParts.join(':').toLowerCase() : null;
+    const macHyphenLower = macParts.length ? macParts.join('-').toLowerCase() : null;
+    const macVariantsStatuses = Array.from(new Set([macColonLower, macColonLower?.toUpperCase()].filter(Boolean)));
+    const macVariantsDevices = Array.from(new Set([
+      macColonLower,
+      macColonLower?.toUpperCase(),
+      macHyphenLower,
+      macHyphenLower?.toUpperCase(),
+    ].filter(Boolean)));
+
+    const normalizeMacValue = (value) => (value || '').toLowerCase().replace(/[^0-9a-f]/g, '');
+
     logger.info(`[FindByMAC] Buscando predio para MAC: ${mac}`);
 
     const orgs = await getOrganizations();
@@ -5846,52 +5859,81 @@ app.get('/api/predios/find-by-mac/:mac', async (req, res) => {
       return res.status(500).json({ error: 'No se pudieron obtener las organizaciones' });
     }
 
-    // Buscar en todas las organizaciones
     const BATCH_SIZE = 3;
     let foundNetwork = null;
     let foundDevice = null;
 
+    const findDeviceInOrg = async (org) => {
+      // 1) Intentar endpoint de statuses con filtro por MAC (más liviano)
+      for (const variant of macVariantsStatuses) {
+        try {
+          const statuses = await getOrganizationDevicesStatuses(org.id, { perPage: 5, 'macs[]': variant });
+          if (Array.isArray(statuses) && statuses.length > 0) {
+            const match = statuses.find((entry) => normalizeMacValue(entry.mac) === mac);
+            if (match) {
+              logger.info(`[FindByMAC] Dispositivo encontrado vía statuses en org ${org.name}: ${match.networkId}`);
+              return {
+                org,
+                networkId: match.networkId,
+                device: {
+                  serial: match.serial || match.deviceSerial || match.recentDeviceSerial || null,
+                  mac: match.mac,
+                  name: match.name || match.productName || match.details?.name || '',
+                  model: match.model || match.productType || match.productModel || null,
+                  networkId: match.networkId,
+                  status: match.status || match.connectionStatus || null,
+                },
+              };
+            }
+          }
+        } catch (error) {
+          logger.warn(`[FindByMAC] Error usando devices/statuses en org ${org.id} con MAC ${variant}: ${error.message}`);
+        }
+      }
+
+      // 2) Fallback al endpoint de devices filtrado por MAC (máximo 2-3 intentos)
+      for (const variant of macVariantsDevices) {
+        try {
+          const params = { mac: variant };
+          const devices = await getOrganizationDevices(org.id, params);
+          if (Array.isArray(devices) && devices.length > 0) {
+            const match = devices.find((entry) => normalizeMacValue(entry.mac) === mac);
+            if (match) {
+              logger.info(`[FindByMAC] Dispositivo encontrado en org ${org.name} usando filtro ${variant}: ${match.networkId}`);
+              return {
+                org,
+                networkId: match.networkId,
+                device: {
+                  serial: match.serial,
+                  mac: match.mac,
+                  name: match.name,
+                  model: match.model,
+                  networkId: match.networkId,
+                },
+              };
+            }
+          }
+        } catch (error) {
+          logger.warn(`[FindByMAC] Error usando devices en org ${org.id} con filtro ${variant}: ${error.message}`);
+        }
+      }
+
+      return null;
+    };
+
     for (let i = 0; i < orgs.length && !foundNetwork; i += BATCH_SIZE) {
       const orgBatch = orgs.slice(i, i + BATCH_SIZE);
-      
-      const batchResults = await Promise.all(
-        orgBatch.map(async (org) => {
-          try {
-            // Obtener todos los dispositivos de la organización
-            const devices = await getOrganizationDevices(org.id);
+      const batchResults = await Promise.all(orgBatch.map(findDeviceInOrg));
 
-            if (devices && devices.length > 0) {
-              // Buscar dispositivo por MAC
-              const device = devices.find(d => {
-                if (!d.mac) return false;
-                const deviceMac = d.mac.toLowerCase().replace(/[^0-9a-f]/g, '');
-                return deviceMac === mac;
-              });
-
-              if (device) {
-                logger.info(`[FindByMAC] Dispositivo encontrado en org ${org.name}: ${device.networkId}`);
-                
-                // Obtener info del network
-                try {
-                  const networkInfo = await getNetworkInfo(device.networkId);
-                  return { network: networkInfo, device, org };
-                } catch (e) {
-                  logger.warn(`[FindByMAC] Error obteniendo info de network ${device.networkId}: ${e.message}`);
-                  return { networkId: device.networkId, device, org };
-                }
-              }
-            }
-            return null;
-          } catch (error) {
-            logger.warn(`[FindByMAC] Error buscando en org ${org.id}: ${error.message}`);
-            return null;
-          }
-        })
-      );
-
-      const found = batchResults.find(r => r !== null);
+      const found = batchResults.find((result) => result !== null);
       if (found) {
-        foundNetwork = found.network || { id: found.networkId };
+        try {
+          const networkInfo = await getNetworkInfo(found.networkId);
+          foundNetwork = networkInfo;
+        } catch (e) {
+          logger.warn(`[FindByMAC] Error obteniendo info de network ${found.networkId}: ${e.message}`);
+          foundNetwork = { id: found.networkId };
+        }
         foundDevice = found.device;
         break;
       }
@@ -5906,7 +5948,6 @@ app.get('/api/predios/find-by-mac/:mac', async (req, res) => {
       });
     }
 
-    // Buscar el predio correspondiente
     const predioInfo = getPredioInfoForNetwork(foundNetwork.id);
     
     if (!predioInfo || predioInfo.predio_code === 'UNKNOWN') {
@@ -5928,7 +5969,8 @@ app.get('/api/predios/find-by-mac/:mac', async (req, res) => {
         mac: foundDevice.mac,
         name: foundDevice.name,
         model: foundDevice.model,
-        networkId: foundDevice.networkId
+        networkId: foundDevice.networkId,
+        status: foundDevice.status || null,
       },
       searchTime: 'mac-search'
     });
