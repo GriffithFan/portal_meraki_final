@@ -445,7 +445,7 @@ const ConnectivityBar = ({ ap, device, networkId, orgId, connectivityDataProp })
     );
   }
   
-  const statusNormalized = normalizeReachability(targetDevice.status);
+  const statusNormalized = normalizeReachability(targetDevice.status) || 'offline';
   const lastReportedAt = targetDevice.lastReportedAt || null;
   const isAP = targetDevice.model && targetDevice.model.toLowerCase().startsWith('mr');
   
@@ -591,6 +591,9 @@ const ConnectivityBar = ({ ap, device, networkId, orgId, connectivityDataProp })
     }
   }, [isAP, historyLength, connectivityDataProp, statusNormalized, historyArray]);
   
+  const offlineStatuses = new Set(['offline', 'disconnected', 'dormant']);
+  const isForceOffline = offlineStatuses.has(statusNormalized);
+
   // Si no hay datos, mostrar barra verde si está online (para switches), o gris si no
   if (!connectivityData || connectivityData.length === 0) {
     const barColor = statusNormalized === 'online' || statusNormalized === 'connected' ? '#22c55e' : '#d1d5db';
@@ -605,6 +608,23 @@ const ConnectivityBar = ({ ap, device, networkId, orgId, connectivityDataProp })
             transition: 'all 0.3s ease'
           }}
           title={barLabel}
+        />
+      </div>
+    );
+  }
+
+  if (isForceOffline) {
+    const offlineLabel = 'Sin conectividad · dispositivo offline';
+    return (
+      <div style={{ display: 'flex', height: '10px', borderRadius: '3px', overflow: 'hidden', border: '1px solid #cbd5e1' }}>
+        <div
+          style={{
+            width: '100%',
+            background: '#cbd5e1',
+            opacity: 0.9,
+            transition: 'all 0.2s ease'
+          }}
+          title={offlineLabel}
         />
       </div>
     );
@@ -1222,6 +1242,46 @@ export default function Dashboard({ onLogout }) {
 
   const preferredSection = summaryData?.networkFlags?.defaultSection;
 
+  // Datos derivados del summary para reutilizar en secciones
+  const devices = summaryData?.devices ?? [];
+  const topology = summaryData?.topology ?? null;
+  const applianceStatus = summaryData?.applianceStatus ?? [];
+  const switchPorts = summaryData?.switchPorts ?? [];
+  const deviceStatuses = summaryData?.deviceStatuses ?? [];
+  const switchesDetailed = summaryData?.switchesDetailed ?? [];
+  const switchesOverview = summaryData?.switchesOverview ?? null;
+  const wirelessInsights = summaryData?.wirelessInsights ?? null;
+
+  const statusMap = useMemo(() => {
+    const entries = [];
+    if (Array.isArray(deviceStatuses)) {
+      deviceStatuses.forEach((deviceStatus) => {
+        const serial = (deviceStatus?.serial || '').toString();
+        if (!serial) return;
+        const raw = deviceStatus.status || deviceStatus.reachability || deviceStatus.connectionStatus;
+        if (!raw) return;
+        entries.push([serial, raw]);
+        entries.push([serial.toUpperCase(), raw]);
+      });
+    }
+    return new Map(entries);
+  }, [deviceStatuses]);
+
+  const topologyDevices = useMemo(() => {
+    if (!Array.isArray(devices)) return [];
+    return devices.map((device) => {
+      const serial = (device?.serial || '').toString();
+      const override = serial ? (statusMap.get(serial) || statusMap.get(serial.toUpperCase())) : null;
+      const resolvedStatus = override || device?.status || device?.reachability || device?.connectionStatus || null;
+      const normalizedStatus = normalizeReachability(resolvedStatus || device?.statusNormalized, 'unknown');
+      return {
+        ...device,
+        status: resolvedStatus,
+        statusNormalized: normalizedStatus,
+      };
+    });
+  }, [devices, statusMap]);
+
   useEffect(() => {
     hasAppliedPreferredRef.current = false;
   }, [summaryData]);
@@ -1702,13 +1762,6 @@ export default function Dashboard({ onLogout }) {
       return <div style={{ padding: '12px', color: '#64748b' }}>Selecciona una sección disponible.</div>;
     }
 
-    // Extraer datos de la sección desde el objeto summaryData
-    const { devices = [], topology = null, applianceStatus = [], switchPorts = [], deviceStatuses = [], switchesDetailed = [], switchesOverview = null, wirelessInsights = null } = summaryData;
-    const statusMap = new Map(deviceStatuses.map(d => {
-      const raw = d.status || d.reachability || d.connectionStatus;
-      return [d.serial, raw];
-    }));
-
     switch (section) {
       case 'topology':
         // Mobile: render the same graph as desktop inside a pan/zoom-friendly wrapper.
@@ -1724,7 +1777,7 @@ export default function Dashboard({ onLogout }) {
                     <div className="mobile-topology-graph-inner">
                       {/* Reuse the same SimpleGraph used on desktop; wrapping enables horizontal scroll/zoom on mobile */}
                       <Suspense fallback={<SkeletonTopology />}>
-                        <SimpleGraph graph={topology} devices={devices} />
+                        <SimpleGraph graph={topology} devices={topologyDevices} />
                       </Suspense>
                     </div>
                   </div>
@@ -1835,7 +1888,7 @@ export default function Dashboard({ onLogout }) {
             {topology?.nodes && topology.nodes.length > 0 ? (
               <div style={{ overflow: 'hidden' }}>
                 <Suspense fallback={<SkeletonTopology />}>
-                  <SimpleGraph graph={topology} devices={devices} />
+                  <SimpleGraph graph={topology} devices={topologyDevices} />
                 </Suspense>
               </div>
             ) : (
@@ -2011,8 +2064,9 @@ export default function Dashboard({ onLogout }) {
                   </div>
                 )}
 
-                <div style={{ overflowX: 'auto', overflowY: 'visible', borderRadius: '12px', border: '1px solid #cbd5e1' }}>
-                  <table className="modern-table" style={{ minWidth: '1200px', width: '100%' }}>
+                <div style={{ position: 'relative', overflow: 'visible' }}>
+                  <div style={{ overflowX: 'auto', borderRadius: '12px', border: '1px solid #cbd5e1' }}>
+                    <table className="modern-table" style={{ minWidth: '1200px', width: '100%' }}>
                     <thead>
                       <tr>
                         <SortableHeader label="Status" sortKey="status" align="center" width="100px" />
@@ -2135,7 +2189,8 @@ export default function Dashboard({ onLogout }) {
                         );
                       })}
                     </tbody>
-                  </table>
+                    </table>
+                  </div>
                 </div>
               </>
             ) : (
@@ -2411,8 +2466,9 @@ export default function Dashboard({ onLogout }) {
                 />
               </div>
 
-              <div style={{ overflowX: 'auto', overflowY: 'visible', borderRadius: '12px', border: '1px solid #cbd5e1' }}>
-                <table className="modern-table" style={{ minWidth: '1400px', width: '100%' }}>
+              <div style={{ position: 'relative', overflow: 'visible' }}>
+                <div style={{ overflowX: 'auto', borderRadius: '12px', border: '1px solid #cbd5e1' }}>
+                  <table className="modern-table" style={{ minWidth: '1400px', width: '100%' }}>
                   <thead>
                     <tr>
                       <SortableHeader label="Status" sortKey="status" align="center" width="80px" />
@@ -2508,7 +2564,7 @@ export default function Dashboard({ onLogout }) {
                               ) : statusIcon;
                             })()}
                           </td>
-                          <td style={{ textAlign: 'left', padding: '8px 10px' }}>
+                          <td style={{ textAlign: 'left', padding: '8px 10px', overflow: 'visible' }}>
                             {isDesktop && apTooltip ? (
                               <Tooltip content={apTooltip} position="right">
                                 <div style={{ fontWeight: '700', color: '#2563eb', fontSize: '14px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', cursor: 'pointer' }}>
@@ -2547,7 +2603,8 @@ export default function Dashboard({ onLogout }) {
                       );
                     })}
                   </tbody>
-                </table>
+                  </table>
+                </div>
               </div>
             </div>
           );

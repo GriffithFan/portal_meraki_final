@@ -1,4 +1,5 @@
 import { useMemo } from 'react';
+import { normalizeReachability, getStatusColor } from '../utils/networkUtils';
 
 const KIND_ORDER = {
   external: 0,
@@ -12,16 +13,7 @@ const KIND_ORDER = {
   device: 7
 };
 
-const STATUS_COLOR = {
-  online: '#45991f',
-  connected: '#45991f',
-  ready: '#45991f',
-  alerting: '#f59e0b',
-  warning: '#f59e0b',
-  degraded: '#f59e0b',
-  offline: '#e74c3c',
-  down: '#e74c3c'
-};
+const DEFAULT_STATUS_COLOR = '#94a3b8';
 
 const SERIAL_PATTERN = /^[A-Z0-9]{2,}(?:-[A-Z0-9]{2,}){2,}$/i;
 
@@ -159,7 +151,36 @@ const cmpNodes = (nodeLookup) => (aId, bId) => {
   return labelA.localeCompare(labelB, undefined, { numeric: true, sensitivity: 'base' });
 };
 
-const statusColorOf = (status) => STATUS_COLOR[status?.toLowerCase?.()] || '#7f8c8d';
+const resolveNodeStatus = (node = {}) => {
+  const candidates = [
+    node.statusNormalized,
+    node.status,
+    node.reachability,
+    node.meta?.statusNormalized,
+    node.meta?.status,
+    node.meta?.reachability,
+  ];
+
+  for (const candidate of candidates) {
+    if (!candidate) continue;
+    const normalized = normalizeReachability(candidate, 'unknown');
+    if (normalized && normalized !== 'unknown') {
+      return normalized;
+    }
+  }
+
+  return 'unknown';
+};
+
+const statusColorOf = (node = {}) => {
+  const normalized = node.statusNormalized && node.statusNormalized !== 'unknown'
+    ? node.statusNormalized
+    : resolveNodeStatus(node);
+  if (normalized && normalized !== 'unknown') {
+    return getStatusColor(normalized);
+  }
+  return DEFAULT_STATUS_COLOR;
+};
 
 const buildLayout = (graph, deviceMap = new Map()) => {
   const rawNodes = Array.isArray(graph?.nodes) ? graph.nodes : [];
@@ -195,8 +216,13 @@ const buildLayout = (graph, deviceMap = new Map()) => {
       productTypes,
       meta,
     };
+    let status = enriched.status;
+    if (!status) {
+      status = meta?.statusNormalized || meta?.status || meta?.reachability || null;
+    }
+    const statusNormalized = resolveNodeStatus({ ...enriched, status });
     const kind = classifyKind(enriched);
-    nodeMap.set(id, { ...enriched, kind });
+    nodeMap.set(id, { ...enriched, status, statusNormalized, kind });
   });
 
   if (!nodeMap.size) {
@@ -810,7 +836,7 @@ export default function SimpleGraph({ graph, devices = [] }) {
       </g>
 
       {layout.nodes.map((node) => {
-        const color = statusColorOf(node.status);
+        const color = statusColorOf(node);
         const isExternal = node.kind === 'external';
         
         // Todos los labels centrados arriba del icono (excepto external que va a la izquierda)
@@ -923,7 +949,10 @@ export default function SimpleGraph({ graph, devices = [] }) {
         const showPrimary = !isExternal && Boolean(primary);
         const showSecondary = !isExternal && Boolean(secondary);
         const showTertiary = !isExternal && Boolean(tertiary);
-        const titleParts = [primary, secondary, tertiary, node.status].filter(Boolean);
+        const statusLabel = node.statusNormalized && node.statusNormalized !== 'unknown'
+          ? node.statusNormalized
+          : node.status;
+        const titleParts = [primary, secondary, tertiary, statusLabel].filter(Boolean);
 
         return (
           <g key={node.id} transform={`translate(${node.x},${node.y})`}>
@@ -964,7 +993,7 @@ export default function SimpleGraph({ graph, devices = [] }) {
                 {tertiary}
               </text>
             )}
-            <title>{titleParts.length ? titleParts.join('\n') : node.status || 'unknown'}</title>
+            <title>{titleParts.length ? titleParts.join('\n') : statusLabel || 'unknown'}</title>
           </g>
         );
       })}

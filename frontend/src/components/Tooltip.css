@@ -27,6 +27,11 @@
   white-space: nowrap;
 }
 
+.tooltip-floating {
+  position: fixed;
+  pointer-events: none;
+}
+
 .tooltip-top {
   bottom: calc(100% + 12px);
   left: 50%;

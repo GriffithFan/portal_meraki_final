@@ -1,4 +1,5 @@
-import { useEffect, useState, useRef } from 'react';
+import { useEffect, useState, useRef, useCallback } from 'react';
+import { createPortal } from 'react-dom';
 import './Tooltip.css';
 
 /**
@@ -18,6 +19,8 @@ const Tooltip = ({ children, content, position = 'auto', modalOnMobile = true })
   const [visible, setVisible] = useState(false);
   const [calculatedPosition, setCalculatedPosition] = useState(position);
   const [isTouch, setIsTouch] = useState(false);
+  const [floatingStyle, setFloatingStyle] = useState(null);
+  const triggerRef = useRef(null);
 
   useEffect(() => {
     try {
@@ -37,26 +40,47 @@ const Tooltip = ({ children, content, position = 'auto', modalOnMobile = true })
 
   const modalRef = useRef(null);
 
-  const handleMouseEnter = (e) => {
+  const computeFloatingStyle = useCallback((placement) => {
+    if (!triggerRef.current || typeof window === 'undefined') return null;
+    const rect = triggerRef.current.getBoundingClientRect();
+    const gap = 12;
+    const centerX = rect.left + rect.width / 2;
+    const centerY = rect.top + rect.height / 2;
+    if (placement === 'top') {
+      return { top: rect.top - gap, left: centerX, transform: 'translate(-50%, -100%)' };
+    }
+    if (placement === 'left') {
+      return { top: centerY, left: rect.left - gap, transform: 'translate(-100%, -50%)' };
+    }
+    if (placement === 'right') {
+      return { top: centerY, left: rect.right + gap, transform: 'translate(0, -50%)' };
+    }
+    // default bottom
+    return { top: rect.bottom + gap, left: centerX, transform: 'translate(-50%, 0)' };
+  }, []);
+
+  const handleMouseEnter = () => {
     // No activar hover si es dispositivo táctil
     if (isTouch) return;
-    setVisible(true);
+    let chosen = position;
     if (position === 'auto') {
       try {
-        const rect = e.currentTarget.getBoundingClientRect();
-        const chosen = rect.top > (window.innerHeight / 2) ? 'top' : 'bottom';
-        setCalculatedPosition(chosen);
+        const rect = triggerRef.current?.getBoundingClientRect();
+        chosen = rect && rect.top > (window.innerHeight / 2) ? 'top' : 'bottom';
       } catch (err) {
-        setCalculatedPosition('bottom');
+        chosen = 'bottom';
       }
-    } else {
-      setCalculatedPosition(position);
     }
+    setCalculatedPosition(chosen);
+    setVisible(true);
+    const style = computeFloatingStyle(chosen);
+    setFloatingStyle(style);
   };
 
   const handleMouseLeave = () => {
     if (isTouch) return;
     setVisible(false);
+    setFloatingStyle(null);
   };
 
   const handleClick = (e) => {
@@ -111,6 +135,23 @@ const Tooltip = ({ children, content, position = 'auto', modalOnMobile = true })
     };
   }, [visible, isTouch, modalOnMobile]);
 
+  useEffect(() => {
+    if (!visible || isTouch) return undefined;
+    const reposition = () => {
+      const style = computeFloatingStyle(calculatedPosition);
+      if (style) {
+        setFloatingStyle(style);
+      }
+    };
+    reposition();
+    window.addEventListener('scroll', reposition, true);
+    window.addEventListener('resize', reposition);
+    return () => {
+      window.removeEventListener('scroll', reposition, true);
+      window.removeEventListener('resize', reposition);
+    };
+  }, [visible, isTouch, calculatedPosition, computeFloatingStyle]);
+
   // Si no hay contenido, renderizar children tal cual (hooks ya fueron llamados)
   if (!content) return <>{children}</>;
 
@@ -120,6 +161,7 @@ const Tooltip = ({ children, content, position = 'auto', modalOnMobile = true })
       onMouseEnter={handleMouseEnter}
       onMouseLeave={handleMouseLeave}
       onClick={handleClick}
+      ref={triggerRef}
     >
       {children}
 
@@ -135,11 +177,19 @@ const Tooltip = ({ children, content, position = 'auto', modalOnMobile = true })
         </>
       )}
 
-      {/* Classic inline tooltip for non-touch or when not using modal */}
-      {visible && (!isTouch || !modalOnMobile) && (
+      {/* Classic inline tooltip for touch devices when modalOnMobile está desactivado */}
+      {visible && isTouch && !modalOnMobile && (
         <div className={`tooltip-content tooltip-${calculatedPosition}`}>
           {typeof content === 'string' ? <div>{content}</div> : content}
         </div>
+      )}
+
+      {/* Desktop floating tooltip rendered vía portal para evitar clipping */}
+      {visible && !isTouch && floatingStyle && typeof document !== 'undefined' && createPortal(
+        <div className={`tooltip-content tooltip-${calculatedPosition} tooltip-floating`} style={floatingStyle}>
+          {typeof content === 'string' ? <div>{content}</div> : content}
+        </div>,
+        document.body
       )}
     </div>
   );
