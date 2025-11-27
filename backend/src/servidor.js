@@ -5859,7 +5859,7 @@ app.get('/api/predios/find-by-mac/:mac', async (req, res) => {
       return res.status(500).json({ error: 'No se pudieron obtener las organizaciones' });
     }
 
-    const BATCH_SIZE = 3;
+    const MAX_CONCURRENCY = Math.min(6, orgs.length);
     let foundNetwork = null;
     let foundDevice = null;
 
@@ -5921,22 +5921,33 @@ app.get('/api/predios/find-by-mac/:mac', async (req, res) => {
       return null;
     };
 
-    for (let i = 0; i < orgs.length && !foundNetwork; i += BATCH_SIZE) {
-      const orgBatch = orgs.slice(i, i + BATCH_SIZE);
-      const batchResults = await Promise.all(orgBatch.map(findDeviceInOrg));
+    const pendingOrgs = [...orgs];
+    let foundResult = null;
 
-      const found = batchResults.find((result) => result !== null);
-      if (found) {
-        try {
-          const networkInfo = await getNetworkInfo(found.networkId);
-          foundNetwork = networkInfo;
-        } catch (e) {
-          logger.warn(`[FindByMAC] Error obteniendo info de network ${found.networkId}: ${e.message}`);
-          foundNetwork = { id: found.networkId };
+    const worker = async () => {
+      while (!foundResult) {
+        const org = pendingOrgs.shift();
+        if (!org) break;
+        const result = await findDeviceInOrg(org);
+        if (result && !foundResult) {
+          foundResult = result;
+          break;
         }
-        foundDevice = found.device;
-        break;
       }
+    };
+
+    // Launch limited workers to keep Meraki API pressure reasonable while avoiding long serial batches.
+    await Promise.all(Array.from({ length: MAX_CONCURRENCY }, () => worker()));
+
+    if (foundResult) {
+      try {
+        const networkInfo = await getNetworkInfo(foundResult.networkId);
+        foundNetwork = networkInfo;
+      } catch (e) {
+        logger.warn(`[FindByMAC] Error obteniendo info de network ${foundResult.networkId}: ${e.message}`);
+        foundNetwork = { id: foundResult.networkId };
+      }
+      foundDevice = foundResult.device;
     }
 
     if (!foundNetwork) {
