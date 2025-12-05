@@ -657,7 +657,7 @@ const ConnectivityBar = React.memo(({ ap, device, networkId, orgId, connectivity
   );
 });
 
-const AccessPointRow = React.memo(({ ap, isDesktop, networkId, orgId, isEnriched }) => {
+const AccessPointRow = React.memo(({ ap, isDesktop, networkId, orgId, isLLDPLoaded }) => {
   const normalizedStatus = normalizeReachability(ap.status);
   const tooltipInfo = ap.tooltipInfo;
   
@@ -726,10 +726,10 @@ const AccessPointRow = React.memo(({ ap, isDesktop, networkId, orgId, isEnriched
       {tooltipInfo.microDrops > 0 && (
         <div className="tooltip-row"><span className="tooltip-label">Microcortes</span><span className="tooltip-badge error">{tooltipInfo.microDrops}</span></div>
       )}
-      {tooltipInfo.connectedTo && tooltipInfo.connectedTo !== '-' && (
+      {isLLDPLoaded && tooltipInfo.connectedTo && tooltipInfo.connectedTo !== '-' && (
         <div className="tooltip-row"><span className="tooltip-label">Conectado a</span><span className="tooltip-value">{tooltipInfo.connectedTo}</span></div>
       )}
-      {tooltipInfo.wiredSpeed && tooltipInfo.wiredSpeed !== '-' && (
+      {isLLDPLoaded && tooltipInfo.wiredSpeed && tooltipInfo.wiredSpeed !== '-' && (
         <div className="tooltip-row"><span className="tooltip-label">Velocidad Ethernet</span><span className="tooltip-value">{tooltipInfo.wiredSpeed}</span></div>
       )}
     </div>
@@ -768,10 +768,10 @@ const AccessPointRow = React.memo(({ ap, isDesktop, networkId, orgId, isEnriched
         {ap.serial}
       </td>
       <td style={{ textAlign: 'left', fontSize: '13px', color: '#1e293b', padding: '8px 10px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-        {formatWiredSpeed(ap.wiredSpeed)}
+        {isLLDPLoaded ? formatWiredSpeed(ap.wiredSpeed) : '-'}
       </td>
       <td style={{ textAlign: 'left', fontSize: '13px', color: '#2563eb', fontWeight: '500', padding: '8px 10px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-        {ap.connectedTo ? ap.connectedTo.replace(/^.*?\s-\s/, '') : '-'}
+        {isLLDPLoaded ? (ap.connectedTo ? ap.connectedTo.replace(/^.*?\s-\s/, '') : '-') : '-'}
       </td>
       <td style={{ textAlign: 'left', fontFamily: 'monospace', fontSize: '12px', color: '#64748b', padding: '8px 10px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
         {ap.mac || '-'}
@@ -784,7 +784,7 @@ const AccessPointRow = React.memo(({ ap, isDesktop, networkId, orgId, isEnriched
 });
 AccessPointRow.displayName = 'AccessPointRow';
 
-const AccessPointCard = React.memo(({ ap, signalThreshold = 25, isEnriched = false }) => {
+const AccessPointCard = React.memo(({ ap, signalThreshold = 25, isLLDPLoaded = false }) => {
   const statusColor = getStatusColor(ap.status);
   const wireless = ap.wireless || {};
   const summary = wireless.signalSummary || wireless.deviceAggregate || {};
@@ -816,7 +816,7 @@ const AccessPointCard = React.memo(({ ap, signalThreshold = 25, isEnriched = fal
             {ap.model} · {ap.serial}
           </p>
           <p className="modern-card-subtitle" style={{ marginTop: '2px', fontSize: '11px' }}>
-            LLDP: {ap.connectedTo || '-'} · {formatWiredSpeed(ap.wiredSpeed)}
+            LLDP: {isLLDPLoaded ? (ap.connectedTo || '-') : '-'} · {isLLDPLoaded ? formatWiredSpeed(ap.wiredSpeed) : '-'}
           </p>
         </div>
         <span 
@@ -2847,7 +2847,7 @@ export default function Dashboard({ onLogout }) {
                         isDesktop={!isMobile}
                         networkId={summaryData?.networkMetadata?.networkInfo?.id}
                         orgId={summaryData?.networkMetadata?.organizationId}
-                        isEnriched={true}
+                        isLLDPLoaded={apDataSource === 'lldp'}
                       />
                     ))}
                   </tbody>
@@ -2888,7 +2888,7 @@ export default function Dashboard({ onLogout }) {
 
             <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(340px, 1fr))', gap: 18 }}>
               {accessPoints.map((ap) => (
-                <AccessPointCard key={ap.serial} ap={ap} isEnriched={true} />
+                <AccessPointCard key={ap.serial} ap={ap} isLLDPLoaded={apDataSource === 'lldp'} />
               ))}
             </div>
           </div>
