@@ -1608,11 +1608,15 @@ export default function Dashboard({ onLogout }) {
   }, [selectedNetwork?.id]);
 
   useEffect(() => {
+    // Solo usar datos del summary si NO tenemos datos LLDP ya cargados
+    if (apDataSource === 'lldp') {
+      return; // No sobreescribir datos LLDP con datos del summary
+    }
     if (Array.isArray(summaryData?.accessPoints) && summaryData.accessPoints.length) {
       setEnrichedAPs(summaryData.accessPoints);
-      setApDataSource(prev => prev === 'lldp' ? prev : 'summary');
+      setApDataSource('summary');
     }
-  }, [summaryData?.accessPoints]);
+  }, [summaryData?.accessPoints, apDataSource]);
 
   // Cargar datos completos de APs con LLDP/CDP cuando se selecciona access_points
   useEffect(() => {
@@ -1634,8 +1638,9 @@ export default function Dashboard({ onLogout }) {
         if (response.ok) {
           const data = await response.json();
           if (data && Array.isArray(data.accessPoints)) {
-            setEnrichedAPs(data.accessPoints);
+            // Datos LLDP tienen prioridad - setear ANTES de marcar como fetched
             setApDataSource('lldp');
+            setEnrichedAPs(data.accessPoints);
             hasFetchedEnrichedApsRef.current = true;
           }
         } else {
