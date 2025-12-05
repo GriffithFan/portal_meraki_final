@@ -175,9 +175,12 @@ export const formatSpeedLabel = (port) => {
 /**
  * Formatea la velocidad cableada (Ethernet) al formato Meraki
  * @param {string} speedString - String de velocidad
- * @returns {string} Velocidad formateada
+ * @param {boolean} isEnriched - Si los datos ya fueron enriquecidos con LLDP
+ * @returns {string} Velocidad formateada o '-' si no está enriquecido
  */
-export const formatWiredSpeed = (speedString) => {
+export const formatWiredSpeed = (speedString, isEnriched = true) => {
+  // Si no está enriquecido, mostrar placeholder hasta que lleguen datos reales
+  if (!isEnriched) return '-';
   if (!speedString || speedString === '-') return '-';
   
   const str = String(speedString).toLowerCase();

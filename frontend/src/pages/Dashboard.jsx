@@ -726,10 +726,10 @@ const AccessPointRow = React.memo(({ ap, isDesktop, networkId, orgId, isEnriched
       {tooltipInfo.microDrops > 0 && (
         <div className="tooltip-row"><span className="tooltip-label">Microcortes</span><span className="tooltip-badge error">{tooltipInfo.microDrops}</span></div>
       )}
-      {tooltipInfo.connectedTo && tooltipInfo.connectedTo !== '-' && (
+      {isEnriched && tooltipInfo.connectedTo && tooltipInfo.connectedTo !== '-' && (
         <div className="tooltip-row"><span className="tooltip-label">Conectado a</span><span className="tooltip-value">{tooltipInfo.connectedTo}</span></div>
       )}
-      {tooltipInfo.wiredSpeed && tooltipInfo.wiredSpeed !== '-' && (
+      {isEnriched && tooltipInfo.wiredSpeed && tooltipInfo.wiredSpeed !== '-' && (
         <div className="tooltip-row"><span className="tooltip-label">Velocidad Ethernet</span><span className="tooltip-value">{tooltipInfo.wiredSpeed}</span></div>
       )}
     </div>
@@ -771,7 +771,7 @@ const AccessPointRow = React.memo(({ ap, isDesktop, networkId, orgId, isEnriched
         {formatWiredSpeed(ap.wiredSpeed, isEnriched)}
       </td>
       <td style={{ textAlign: 'left', fontSize: '13px', color: '#2563eb', fontWeight: '500', padding: '8px 10px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-        {ap.connectedTo ? ap.connectedTo.replace(/^.*?\s-\s/, '') : '-'}
+        {isEnriched ? (ap.connectedTo ? ap.connectedTo.replace(/^.*?\s-\s/, '') : '-') : '-'}
       </td>
       <td style={{ textAlign: 'left', fontFamily: 'monospace', fontSize: '12px', color: '#64748b', padding: '8px 10px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
         {ap.mac || '-'}
@@ -816,7 +816,7 @@ const AccessPointCard = React.memo(({ ap, signalThreshold = 25, isEnriched = fal
             {ap.model} · {ap.serial}
           </p>
           <p className="modern-card-subtitle" style={{ marginTop: '2px', fontSize: '11px' }}>
-            LLDP: {ap.connectedTo || '-'} · {formatWiredSpeed(ap.wiredSpeed, isEnriched)}
+            LLDP: {isEnriched ? (ap.connectedTo || '-') : '-'} · {formatWiredSpeed(ap.wiredSpeed, isEnriched)}
           </p>
         </div>
         <span 
