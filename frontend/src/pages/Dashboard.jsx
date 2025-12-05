@@ -2843,7 +2843,7 @@ export default function Dashboard({ onLogout }) {
                         isDesktop={!isMobile}
                         networkId={summaryData?.networkMetadata?.networkInfo?.id}
                         orgId={summaryData?.networkMetadata?.organizationId}
-                        isEnriched={enrichedAPs !== null}
+                        isEnriched={apDataSource === 'lldp'}
                       />
                     ))}
                   </tbody>
@@ -2884,7 +2884,7 @@ export default function Dashboard({ onLogout }) {
 
             <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(340px, 1fr))', gap: 18 }}>
               {accessPoints.map((ap) => (
-                <AccessPointCard key={ap.serial} ap={ap} isEnriched={enrichedAPs !== null} />
+                <AccessPointCard key={ap.serial} ap={ap} isEnriched={apDataSource === 'lldp'} />
               ))}
             </div>
           </div>

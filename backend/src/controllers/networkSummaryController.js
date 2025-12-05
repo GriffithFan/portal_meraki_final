@@ -393,15 +393,15 @@ async function getNetworkSummary(req, res) {
   };
 
   // Inferir velocidad Ethernet basada en el modelo del AP
+  // Solo retorna valores cuando hay certeza del puerto físico, null si no se puede determinar
   const inferSpeedFromModel = (model) => {
     if (!model) return null;
     const normalized = model.toString().toUpperCase();
-    // MR access points con puerto multigigabit
+    // MR access points con puerto multigigabit conocido
     if (/MR(4[4-9]|5[0-9]|7[0-9]|8[0-9])/i.test(normalized)) return '2.5 Gbps';
-    // MR access points con puerto gigabit estándar
-    if (/MR(2[0-9]|3[0-9]|4[0-3])/i.test(normalized)) return '1000 Mbps';
-    // Fallback para otros modelos
-    return '1000 Mbps';
+    // NO inferir velocidades para otros modelos - dejar null para mostrar '-'
+    // El dato real vendrá del LLDP/CDP
+    return null;
   };
 
   const flattenAppliancePortStatuses = (raw) => {
