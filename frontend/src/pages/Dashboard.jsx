@@ -726,10 +726,10 @@ const AccessPointRow = React.memo(({ ap, isDesktop, networkId, orgId, isEnriched
       {tooltipInfo.microDrops > 0 && (
         <div className="tooltip-row"><span className="tooltip-label">Microcortes</span><span className="tooltip-badge error">{tooltipInfo.microDrops}</span></div>
       )}
-      {isEnriched && tooltipInfo.connectedTo && tooltipInfo.connectedTo !== '-' && (
+      {tooltipInfo.connectedTo && tooltipInfo.connectedTo !== '-' && (
         <div className="tooltip-row"><span className="tooltip-label">Conectado a</span><span className="tooltip-value">{tooltipInfo.connectedTo}</span></div>
       )}
-      {isEnriched && tooltipInfo.wiredSpeed && tooltipInfo.wiredSpeed !== '-' && (
+      {tooltipInfo.wiredSpeed && tooltipInfo.wiredSpeed !== '-' && (
         <div className="tooltip-row"><span className="tooltip-label">Velocidad Ethernet</span><span className="tooltip-value">{tooltipInfo.wiredSpeed}</span></div>
       )}
     </div>
@@ -768,10 +768,10 @@ const AccessPointRow = React.memo(({ ap, isDesktop, networkId, orgId, isEnriched
         {ap.serial}
       </td>
       <td style={{ textAlign: 'left', fontSize: '13px', color: '#1e293b', padding: '8px 10px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-        {formatWiredSpeed(ap.wiredSpeed, isEnriched)}
+        {formatWiredSpeed(ap.wiredSpeed)}
       </td>
       <td style={{ textAlign: 'left', fontSize: '13px', color: '#2563eb', fontWeight: '500', padding: '8px 10px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-        {isEnriched ? (ap.connectedTo ? ap.connectedTo.replace(/^.*?\s-\s/, '') : '-') : '-'}
+        {ap.connectedTo ? ap.connectedTo.replace(/^.*?\s-\s/, '') : '-'}
       </td>
       <td style={{ textAlign: 'left', fontFamily: 'monospace', fontSize: '12px', color: '#64748b', padding: '8px 10px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
         {ap.mac || '-'}
@@ -816,7 +816,7 @@ const AccessPointCard = React.memo(({ ap, signalThreshold = 25, isEnriched = fal
             {ap.model} · {ap.serial}
           </p>
           <p className="modern-card-subtitle" style={{ marginTop: '2px', fontSize: '11px' }}>
-            LLDP: {isEnriched ? (ap.connectedTo || '-') : '-'} · {formatWiredSpeed(ap.wiredSpeed, isEnriched)}
+            LLDP: {ap.connectedTo || '-'} · {formatWiredSpeed(ap.wiredSpeed)}
           </p>
         </div>
         <span 
@@ -1616,42 +1616,24 @@ export default function Dashboard({ onLogout }) {
 
   // Cargar datos completos de APs con LLDP/CDP cuando se selecciona access_points
   useEffect(() => {
-    // Debug en desarrollo
-    if (import.meta?.env?.DEV) {
-      console.log('🔍 [LLDP Effect] Checking:', { 
-        networkId: selectedNetwork?.id, 
-        section, 
-        hasFetched: hasFetchedEnrichedApsRef.current,
-        apDataSource 
-      });
-    }
-
     if (!selectedNetwork?.id) return;
     if (section !== 'access_points') return;
+    
+    // Si ya cargamos LLDP para esta red, no volver a cargar
+    if (hasFetchedEnrichedApsRef.current) {
+      return;
+    }
 
     const controller = new AbortController();
 
-    // Si ya tenemos datos LLDP reales, no volver a cargar
-    if (hasFetchedEnrichedApsRef.current && apDataSource === 'lldp') {
-      setLoadingLLDP(false);
-      return () => controller.abort();
-    }
-
     const fetchEnrichedAPs = async () => {
       setLoadingLLDP(true);
-      if (import.meta?.env?.DEV) {
-        console.log('🚀 [LLDP] Fetching enriched APs...');
-      }
       try {
         const url = `/api/networks/${selectedNetwork.id}/section/access_points`;
-        // Usar fetchAPI con anti-cache para datos frescos
         const response = await fetchAPI(url, { signal: controller.signal });
         if (response.ok) {
           const data = await response.json();
           if (data && Array.isArray(data.accessPoints)) {
-            if (import.meta?.env?.DEV) {
-              console.log('✅ [LLDP] Got', data.accessPoints.length, 'APs');
-            }
             setEnrichedAPs(data.accessPoints);
             setApDataSource('lldp');
             hasFetchedEnrichedApsRef.current = true;
@@ -1670,7 +1652,7 @@ export default function Dashboard({ onLogout }) {
     fetchEnrichedAPs();
 
     return () => controller.abort();
-  }, [selectedNetwork?.id, section, apDataSource]);
+  }, [selectedNetwork?.id, section]);
 
   // Carga lazy de una sección específica
   const loadSection = useCallback(async (sectionKey, { force = false } = {}) => {
@@ -2860,7 +2842,7 @@ export default function Dashboard({ onLogout }) {
                         isDesktop={!isMobile}
                         networkId={summaryData?.networkMetadata?.networkInfo?.id}
                         orgId={summaryData?.networkMetadata?.organizationId}
-                        isEnriched={apDataSource === 'lldp'}
+                        isEnriched={true}
                       />
                     ))}
                   </tbody>
@@ -2901,7 +2883,7 @@ export default function Dashboard({ onLogout }) {
 
             <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(340px, 1fr))', gap: 18 }}>
               {accessPoints.map((ap) => (
-                <AccessPointCard key={ap.serial} ap={ap} isEnriched={apDataSource === 'lldp'} />
+                <AccessPointCard key={ap.serial} ap={ap} isEnriched={true} />
               ))}
             </div>
           </div>
