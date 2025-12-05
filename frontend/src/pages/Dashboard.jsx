@@ -1616,18 +1616,32 @@ export default function Dashboard({ onLogout }) {
 
   // Cargar datos completos de APs con LLDP/CDP cuando se selecciona access_points
   useEffect(() => {
+    // Debug en desarrollo
+    if (import.meta?.env?.DEV) {
+      console.log('🔍 [LLDP Effect] Checking:', { 
+        networkId: selectedNetwork?.id, 
+        section, 
+        hasFetched: hasFetchedEnrichedApsRef.current,
+        apDataSource 
+      });
+    }
+
     if (!selectedNetwork?.id) return;
     if (section !== 'access_points') return;
 
     const controller = new AbortController();
 
-    if (hasFetchedEnrichedApsRef.current) {
+    // Si ya tenemos datos LLDP reales, no volver a cargar
+    if (hasFetchedEnrichedApsRef.current && apDataSource === 'lldp') {
       setLoadingLLDP(false);
       return () => controller.abort();
     }
 
     const fetchEnrichedAPs = async () => {
       setLoadingLLDP(true);
+      if (import.meta?.env?.DEV) {
+        console.log('🚀 [LLDP] Fetching enriched APs...');
+      }
       try {
         const url = `/api/networks/${selectedNetwork.id}/section/access_points`;
         // Usar fetchAPI con anti-cache para datos frescos
@@ -1635,6 +1649,9 @@ export default function Dashboard({ onLogout }) {
         if (response.ok) {
           const data = await response.json();
           if (data && Array.isArray(data.accessPoints)) {
+            if (import.meta?.env?.DEV) {
+              console.log('✅ [LLDP] Got', data.accessPoints.length, 'APs');
+            }
             setEnrichedAPs(data.accessPoints);
             setApDataSource('lldp');
             hasFetchedEnrichedApsRef.current = true;
@@ -1653,7 +1670,7 @@ export default function Dashboard({ onLogout }) {
     fetchEnrichedAPs();
 
     return () => controller.abort();
-  }, [selectedNetwork?.id, section]);
+  }, [selectedNetwork?.id, section, apDataSource]);
 
   // Carga lazy de una sección específica
   const loadSection = useCallback(async (sectionKey, { force = false } = {}) => {
