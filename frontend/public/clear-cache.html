@@ -1,0 +1,236 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Portal Meraki - Limpiar Caché</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+      background: linear-gradient(135deg, #1e3a8a 0%, #3b82f6 100%);
+      min-height: 100vh;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 20px;
+    }
+    .container {
+      background: white;
+      border-radius: 16px;
+      padding: 40px;
+      max-width: 500px;
+      width: 100%;
+      box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.25);
+    }
+    h1 {
+      color: #1e3a8a;
+      font-size: 24px;
+      margin-bottom: 16px;
+      display: flex;
+      align-items: center;
+      gap: 12px;
+    }
+    h1::before {
+      content: '🔧';
+      font-size: 32px;
+    }
+    p {
+      color: #64748b;
+      line-height: 1.6;
+      margin-bottom: 24px;
+    }
+    .status {
+      background: #f1f5f9;
+      border-radius: 8px;
+      padding: 16px;
+      margin-bottom: 24px;
+      font-family: monospace;
+      font-size: 13px;
+      max-height: 200px;
+      overflow-y: auto;
+    }
+    .status-item {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      margin-bottom: 8px;
+    }
+    .status-item:last-child { margin-bottom: 0; }
+    .status-item.success { color: #059669; }
+    .status-item.error { color: #dc2626; }
+    .status-item.pending { color: #64748b; }
+    .btn {
+      background: #2563eb;
+      color: white;
+      border: none;
+      padding: 14px 28px;
+      border-radius: 8px;
+      font-size: 16px;
+      font-weight: 600;
+      cursor: pointer;
+      width: 100%;
+      transition: all 0.2s;
+    }
+    .btn:hover:not(:disabled) {
+      background: #1d4ed8;
+      transform: translateY(-1px);
+    }
+    .btn:disabled {
+      background: #94a3b8;
+      cursor: not-allowed;
+    }
+    .btn-secondary {
+      background: #059669;
+      margin-top: 12px;
+    }
+    .btn-secondary:hover:not(:disabled) {
+      background: #047857;
+    }
+    .warning {
+      background: #fef3c7;
+      border: 1px solid #fde68a;
+      border-radius: 8px;
+      padding: 12px;
+      margin-bottom: 24px;
+      color: #92400e;
+      font-size: 14px;
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <h1>Limpiar Caché</h1>
+    <p>
+      Esta herramienta limpia todos los caches del navegador y desregistra los service workers.
+      Útil cuando los datos se muestran incorrectamente o hay problemas de actualización.
+    </p>
+    
+    <div class="warning">
+      ⚠️ Después de limpiar, deberás iniciar sesión nuevamente.
+    </div>
+    
+    <div class="status" id="status">
+      <div class="status-item pending">⏳ Esperando acción...</div>
+    </div>
+    
+    <button class="btn" id="clearBtn" onclick="clearAllCaches()">
+      🗑️ Limpiar Todo y Reiniciar
+    </button>
+    
+    <button class="btn btn-secondary" id="backBtn" onclick="location.href='/'">
+      ← Volver al Portal
+    </button>
+  </div>
+
+  <script>
+    const statusEl = document.getElementById('status');
+    const clearBtn = document.getElementById('clearBtn');
+    
+    function log(message, type = 'pending') {
+      const item = document.createElement('div');
+      item.className = `status-item ${type}`;
+      const icon = type === 'success' ? '✅' : type === 'error' ? '❌' : '⏳';
+      item.textContent = `${icon} ${message}`;
+      statusEl.appendChild(item);
+      statusEl.scrollTop = statusEl.scrollHeight;
+    }
+    
+    function clearStatus() {
+      statusEl.innerHTML = '';
+    }
+    
+    async function clearAllCaches() {
+      clearBtn.disabled = true;
+      clearStatus();
+      
+      try {
+        // 1. Limpiar localStorage
+        log('Limpiando localStorage...');
+        const keysToKeep = []; // Puedes añadir keys que no quieras borrar
+        const allKeys = Object.keys(localStorage);
+        allKeys.forEach(key => {
+          if (!keysToKeep.includes(key)) {
+            localStorage.removeItem(key);
+          }
+        });
+        log(`localStorage limpiado (${allKeys.length} items)`, 'success');
+        
+        // 2. Limpiar sessionStorage
+        log('Limpiando sessionStorage...');
+        const sessionKeys = Object.keys(sessionStorage);
+        sessionStorage.clear();
+        log(`sessionStorage limpiado (${sessionKeys.length} items)`, 'success');
+        
+        // 3. Limpiar Cache Storage (Service Worker caches)
+        if ('caches' in window) {
+          log('Limpiando Cache Storage...');
+          const cacheNames = await caches.keys();
+          await Promise.all(cacheNames.map(name => caches.delete(name)));
+          log(`Cache Storage limpiado (${cacheNames.length} caches)`, 'success');
+        } else {
+          log('Cache Storage no disponible', 'pending');
+        }
+        
+        // 4. Desregistrar Service Workers
+        if ('serviceWorker' in navigator) {
+          log('Desregistrando Service Workers...');
+          const registrations = await navigator.serviceWorker.getRegistrations();
+          await Promise.all(registrations.map(reg => reg.unregister()));
+          log(`Service Workers desregistrados (${registrations.length})`, 'success');
+        } else {
+          log('Service Workers no disponibles', 'pending');
+        }
+        
+        // 5. Limpiar IndexedDB (opcional, puede contener datos de PWA)
+        if ('indexedDB' in window) {
+          log('Limpiando IndexedDB...');
+          const databases = await indexedDB.databases?.() || [];
+          for (const db of databases) {
+            if (db.name) {
+              indexedDB.deleteDatabase(db.name);
+            }
+          }
+          log(`IndexedDB limpiado (${databases.length} bases)`, 'success');
+        }
+        
+        // 6. Finalizar
+        log('¡Limpieza completada! Recargando...', 'success');
+        
+        // Esperar un momento y recargar
+        setTimeout(() => {
+          // Forzar recarga completa sin cache
+          window.location.href = '/?_cache_bust=' + Date.now();
+        }, 1500);
+        
+      } catch (error) {
+        log(`Error: ${error.message}`, 'error');
+        clearBtn.disabled = false;
+      }
+    }
+    
+    // Verificar estado actual al cargar
+    async function checkCurrentState() {
+      clearStatus();
+      
+      // Contar items en localStorage
+      const localItems = Object.keys(localStorage).length;
+      log(`localStorage: ${localItems} items`, localItems > 0 ? 'pending' : 'success');
+      
+      // Contar caches
+      if ('caches' in window) {
+        const cacheNames = await caches.keys();
+        log(`Cache Storage: ${cacheNames.length} caches`, cacheNames.length > 0 ? 'pending' : 'success');
+      }
+      
+      // Contar service workers
+      if ('serviceWorker' in navigator) {
+        const registrations = await navigator.serviceWorker.getRegistrations();
+        log(`Service Workers: ${registrations.length} registrados`, registrations.length > 0 ? 'pending' : 'success');
+      }
+    }
+    
+    checkCurrentState();
+  </script>
+</body>
+</html>

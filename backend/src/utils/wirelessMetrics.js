@@ -1,5 +1,13 @@
 const DEFAULT_WIRELESS_TIMESPAN = 86400; // 24h para métricas de señal
 
+const { logger } = require('../config/logger');
+
+const serialKeyOf = (serial) => {
+  if (!serial && serial !== 0) return null;
+  const text = serial.toString().trim().toUpperCase();
+  return text || null;
+};
+
 function composeWirelessMetrics({
   accessPoints = [],
   networkId = null,
@@ -36,17 +44,10 @@ function composeWirelessMetrics({
     }
     if (typeof value === 'string') {
       const cleaned = value.replace(/[^0-9+\-.]/g, '');
-      if (!cleaned) return null;
       const parsed = Number(cleaned);
       return Number.isFinite(parsed) ? parsed : null;
     }
     return null;
-  };
-
-  const serialKeyOf = (value) => {
-    if (!value && value !== 0) return null;
-    const text = value.toString().trim().toUpperCase();
-    return text || null;
   };
 
   const registerSerialEntry = (map, serial, value) => {
@@ -264,14 +265,14 @@ function composeWirelessMetrics({
 
   const failuresMap = new Map();
   const failedConnectionsArray = toArray(failedConnectionsRaw);
-  console.debug(`Procesando ${failedConnectionsArray.length} conexiones fallidas (wireless)`);
+  logger.debug(`Procesando ${failedConnectionsArray.length} conexiones fallidas (wireless)`);
   
   failedConnectionsArray.forEach((failure) => {
     if (!failure || !failure.serial || !failure.ts) return;
     pushSerialBucket(failuresMap, failure.serial, failure);
   });
   
-  console.debug(`FailuresMap: ${failuresMap.size} APs con incidencias (wireless)`);
+  logger.debug(`FailuresMap: ${failuresMap.size} APs con incidencias (wireless)`);
 
   const processFailuresToHistory = (failures, timespan = 86400) => {
     if (!Array.isArray(failures) || failures.length === 0) return [];

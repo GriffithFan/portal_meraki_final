@@ -1,6 +1,7 @@
 // Sistema de Warm Cache para pre-cargar predios frecuentes
 const { findPredio, searchPredios } = require('./prediosManager');
 const { getNetworkInfo, getNetworkDevices, getOrganizationDevicesStatuses, getNetworkSwitchPortsStatuses } = require('./merakiApi');
+const { logger } = require('./config/logger');
 
 // Lista de códigos de predios más frecuentes (actualizar según uso real)
 const FREQUENT_PREDIOS = [
@@ -62,7 +63,7 @@ async function warmUpPredio(predioCode, cache) {
     const enrichedAPs = aps.map(ap => ({
       ...ap,
       status: statusMap.get(ap.serial) || ap.status,
-      wiredSpeed: '1000 Mbps',
+      wiredSpeed: '-',  // Mostrar '-' hasta obtener datos reales
       connectedTo: '-'
     }));
     cache.switchPorts.set(`${networkId}_access_points`, { 
@@ -97,7 +98,7 @@ async function warmUpPredio(predioCode, cache) {
     }
 
   } catch (error) {
-    console.error(`Error en la precarga del predio ${predioCode}:`, error.message);
+    logger.error(`Error en la precarga del predio ${predioCode}: ${error.message}`);
   }
 }
 

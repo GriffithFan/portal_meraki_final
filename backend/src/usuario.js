@@ -1,11 +1,34 @@
 // Gestión de técnicos usando archivo JSON
+// SEGURIDAD: Migrado de SHA-256 a bcrypt (2025-12-04)
 const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
+const bcrypt = require('bcrypt');
+const { logger } = require('./config/logger');
 
-// Función para hashear contraseñas
-function hashPassword(password) {
+// Configuración de bcrypt
+const BCRYPT_ROUNDS = 12; // Balance entre seguridad y performance
+
+// Función legacy para verificar hashes SHA-256 (solo lectura, para migración)
+function hashPasswordLegacy(password) {
   return crypto.createHash('sha256').update(password).digest('hex');
+}
+
+// Función para detectar si un hash es SHA-256 o bcrypt
+function isLegacyHash(hash) {
+  // SHA-256 produce 64 caracteres hexadecimales
+  // bcrypt produce ~60 caracteres y empieza con $2b$ o $2a$
+  return hash && hash.length === 64 && /^[a-f0-9]+$/.test(hash);
+}
+
+// Función para hashear contraseñas con bcrypt (async)
+async function hashPassword(password) {
+  return bcrypt.hash(password, BCRYPT_ROUNDS);
+}
+
+// Función sincrónica para hashear (para compatibilidad)
+function hashPasswordSync(password) {
+  return bcrypt.hashSync(password, BCRYPT_ROUNDS);
 }
 
 // Path al archivo de técnicos (FUERA de src/ para no ser sobrescrito por git pull)
@@ -27,7 +50,8 @@ function initTecnicosFile() {
       const oldData = fs.readFileSync(oldPath, 'utf-8');
       fs.writeFileSync(TECNICOS_PATH, oldData, 'utf-8');
     } else {
-      // Crear archivo con usuarios por defecto
+      // Crear archivo con usuarios por defecto (hashes legacy SHA-256)
+      // Se migrarán automáticamente a bcrypt en el primer login exitoso
       const defaultUsers = [
         { username: "tecnico1@empresa.com", password: "9010e72389a80487d473017425c6ec7951068abed82a4df32459c91f0e45d2ea" },
         { username: "tecnico2@empresa.com", password: "998aab960cd9f809b09dd12eade1de4a2985f62335d8ff45a775a598ead09b06" },
@@ -44,15 +68,61 @@ function initTecnicosFile() {
 // Ejecutar inicialización al cargar el módulo
 initTecnicosFile();
 
-// Función para validar usuario y contraseña de técnico usando el archivo tecnicos.json
-function validarTecnico(username, password) {
+// Función para validar usuario y contraseña (con migración automática a bcrypt)
+async function validarTecnico(username, password) {
   try {
     const data = fs.readFileSync(TECNICOS_PATH, 'utf-8');
     const tecnicos = JSON.parse(data);
-    const hashedPassword = hashPassword(password);
-    return tecnicos.some(t => t.username === username && t.password === hashedPassword);
+    const tecnico = tecnicos.find(t => t.username === username);
+    
+    if (!tecnico) {
+      return false;
+    }
+    
+    // Verificar si es hash legacy (SHA-256)
+    if (isLegacyHash(tecnico.password)) {
+      // Comparar con hash SHA-256
+      const legacyHash = hashPasswordLegacy(password);
+      if (tecnico.password === legacyHash) {
+        // ¡Login exitoso! Migrar a bcrypt automáticamente
+        logger.info(`[usuario.js] Migrando contraseña de ${username} a bcrypt`);
+        tecnico.password = await hashPassword(password);
+        tecnico.migratedAt = new Date().toISOString();
+        guardarTecnicos(tecnicos);
+        return true;
+      }
+      return false;
+    }
+    
+    // Verificar con bcrypt
+    return bcrypt.compare(password, tecnico.password);
   } catch (error) {
-    console.error('Error validando técnico:', error.message);
+    logger.error('Error validando técnico:', { error: error.message });
+    return false;
+  }
+}
+
+// Versión sincrónica para compatibilidad (NO migra automáticamente)
+function validarTecnicoSync(username, password) {
+  try {
+    const data = fs.readFileSync(TECNICOS_PATH, 'utf-8');
+    const tecnicos = JSON.parse(data);
+    const tecnico = tecnicos.find(t => t.username === username);
+    
+    if (!tecnico) {
+      return false;
+    }
+    
+    // Verificar si es hash legacy (SHA-256)
+    if (isLegacyHash(tecnico.password)) {
+      const legacyHash = hashPasswordLegacy(password);
+      return tecnico.password === legacyHash;
+    }
+    
+    // Verificar con bcrypt
+    return bcrypt.compareSync(password, tecnico.password);
+  } catch (error) {
+    logger.error('Error validando técnico (sync):', { error: error.message });
     return false;
   }
 }
@@ -66,15 +136,48 @@ function listarTecnicos() {
   }
 }
 
+// Buscar técnico por username (retorna objeto sin password)
+function buscarTecnico(username) {
+  const tecnicos = listarTecnicos();
+  const tecnico = tecnicos.find(t => t.username === username);
+  if (!tecnico) return null;
+  // Retornar sin password por seguridad
+  const { password, ...tecnicoSinPassword } = tecnico;
+  return tecnicoSinPassword;
+}
+
 function guardarTecnicos(list) {
   fs.writeFileSync(TECNICOS_PATH, JSON.stringify(list, null, 2), 'utf-8');
 }
 
-function agregarTecnico(username, password) {
+// Agregar técnico con bcrypt (async)
+async function agregarTecnico(username, password) {
   const list = listarTecnicos();
-  if (list.find(t => t.username === username)) return { ok: false, error: 'Usuario ya existe' };
-  const hashedPassword = hashPassword(password);
-  list.push({ username, password: hashedPassword });
+  if (list.find(t => t.username === username)) {
+    return { ok: false, error: 'Usuario ya existe' };
+  }
+  const hashedPassword = await hashPassword(password);
+  list.push({ 
+    username, 
+    password: hashedPassword,
+    createdAt: new Date().toISOString()
+  });
+  guardarTecnicos(list);
+  return { ok: true };
+}
+
+// Versión sincrónica para compatibilidad
+function agregarTecnicoSync(username, password) {
+  const list = listarTecnicos();
+  if (list.find(t => t.username === username)) {
+    return { ok: false, error: 'Usuario ya existe' };
+  }
+  const hashedPassword = hashPasswordSync(password);
+  list.push({ 
+    username, 
+    password: hashedPassword,
+    createdAt: new Date().toISOString()
+  });
   guardarTecnicos(list);
   return { ok: true };
 }
@@ -82,9 +185,36 @@ function agregarTecnico(username, password) {
 function eliminarTecnico(username) {
   const list = listarTecnicos();
   const next = list.filter(t => t.username !== username);
-  if (next.length === list.length) return { ok: false, error: 'Usuario no encontrado' };
+  if (next.length === list.length) {
+    return { ok: false, error: 'Usuario no encontrado' };
+  }
   guardarTecnicos(next);
   return { ok: true };
 }
 
-module.exports = { validarTecnico, listarTecnicos, agregarTecnico, eliminarTecnico };
+// Cambiar contraseña de un técnico (async)
+async function cambiarPassword(username, newPassword) {
+  const list = listarTecnicos();
+  const tecnico = list.find(t => t.username === username);
+  if (!tecnico) {
+    return { ok: false, error: 'Usuario no encontrado' };
+  }
+  tecnico.password = await hashPassword(newPassword);
+  tecnico.passwordChangedAt = new Date().toISOString();
+  guardarTecnicos(list);
+  return { ok: true };
+}
+
+module.exports = { 
+  validarTecnico,
+  validarTecnicoSync,
+  listarTecnicos,
+  buscarTecnico,
+  agregarTecnico,
+  agregarTecnicoSync,
+  eliminarTecnico,
+  cambiarPassword,
+  // Exportar constantes para testing
+  BCRYPT_ROUNDS,
+  isLegacyHash
+};

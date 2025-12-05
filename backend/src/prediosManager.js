@@ -1,5 +1,6 @@
 const fs = require('fs');
 const path = require('path');
+const { logger } = require('./config/logger');
 
 /**
  * Módulo para gestión de códigos de predios via CSV
@@ -42,7 +43,7 @@ function parseCsvLine(line) {
 function loadPrediosFromCSV() {
   try {
     if (!fs.existsSync(CSV_PATH)) {
-      console.warn('Archivo predios.csv no encontrado. Creando plantilla...');
+      logger.warn('Archivo predios.csv no encontrado. Creando plantilla...');
       createSampleCSV();
       return new Map();
     }
@@ -58,7 +59,7 @@ function loadPrediosFromCSV() {
     const lines = csvContent.split('\n').filter(line => line.trim());
     
     if (lines.length < 2) {
-      console.warn('CSV de predios vacío o sin datos');
+      logger.warn('CSV de predios vacío o sin datos');
       return new Map();
     }
 
@@ -87,11 +88,11 @@ function loadPrediosFromCSV() {
 
     prediosCache = prediosMap;
     lastModified = stats.mtime;
-  console.log(`Cargados ${uniqueNetworkIds.size} predios desde CSV`);
+  logger.info(`Cargados ${uniqueNetworkIds.size} predios desde CSV`);
     
     return prediosMap;
   } catch (error) {
-    console.error('Error cargando predios.csv:', error.message);
+    logger.error('Error cargando predios.csv:', { error: error.message });
     return new Map();
   }
 }
@@ -189,7 +190,7 @@ L_123456789012345682,PRD005,Centro de Distribución,654322,Organización Este,Oe
   }
   
   fs.writeFileSync(CSV_PATH, sampleData);
-  console.log('Creado archivo predios.csv de ejemplo');
+  logger.info('Creado archivo predios.csv de ejemplo');
 }
 
 /**

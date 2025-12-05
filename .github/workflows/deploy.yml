@@ -1,0 +1,93 @@
+name: Deploy to VPS
+
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Environment to deploy to'
+        required: true
+        default: 'production'
+        type: choice
+        options:
+          - production
+          - staging
+
+jobs:
+  deploy:
+    name: Deploy to ${{ github.event.inputs.environment }}
+    runs-on: ubuntu-latest
+    environment: ${{ github.event.inputs.environment }}
+    
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20.x'
+
+      # Build frontend
+      - name: Install frontend dependencies
+        run: npm ci
+        working-directory: ./frontend
+
+      - name: Build frontend
+        run: npm run build
+        working-directory: ./frontend
+
+      # Deploy via SSH
+      - name: Deploy to VPS
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.VPS_HOST }}
+          username: ${{ secrets.VPS_USER }}
+          key: ${{ secrets.VPS_SSH_KEY }}
+          port: ${{ secrets.VPS_PORT || 22 }}
+          script: |
+            cd /var/www/portal-meraki
+            
+            # Backup actual
+            echo "📦 Creando backup..."
+            cp -r backend backend.backup.$(date +%Y%m%d_%H%M%S) || true
+            
+            # Pull cambios
+            echo "⬇️ Actualizando código..."
+            git fetch origin main
+            git reset --hard origin/main
+            
+            # Backend
+            echo "🔧 Instalando dependencias del backend..."
+            cd backend
+            npm ci --production
+            
+            # Reiniciar con PM2
+            echo "🔄 Reiniciando servicios..."
+            pm2 restart ecosystem.config.js --env production || pm2 start ecosystem.config.js --env production
+            
+            echo "✅ Deploy completado"
+
+      # Upload frontend build
+      - name: Upload frontend build
+        uses: appleboy/scp-action@v0.1.7
+        with:
+          host: ${{ secrets.VPS_HOST }}
+          username: ${{ secrets.VPS_USER }}
+          key: ${{ secrets.VPS_SSH_KEY }}
+          port: ${{ secrets.VPS_PORT || 22 }}
+          source: "frontend/dist/*"
+          target: "/var/www/portal-meraki/frontend/dist"
+          strip_components: 2
+
+      - name: Post-deploy verification
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.VPS_HOST }}
+          username: ${{ secrets.VPS_USER }}
+          key: ${{ secrets.VPS_SSH_KEY }}
+          port: ${{ secrets.VPS_PORT || 22 }}
+          script: |
+            # Verificar que el servicio esté corriendo
+            sleep 5
+            curl -f http://localhost:3000/api/health || exit 1
+            echo "✅ Servicio verificado y funcionando"

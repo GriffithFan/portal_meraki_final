@@ -1,7 +1,8 @@
 // Middleware de seguridad para el servidor
 const helmet = require('helmet');
+const jwt = require('jsonwebtoken');
 const { rateLimit } = require('express-rate-limit');
-const { logSecurity } = require('../config/logger');
+const { logSecurity, logger } = require('../config/logger');
 
 /**
  * Configuración de Helmet para headers de seguridad
@@ -221,6 +222,72 @@ function logRequestsSospechosos(req, res, next) {
   next();
 }
 
+/**
+ * Middleware para verificar JWT de técnicos
+ * Verifica que el token sea válido y que el rol sea 'tecnico'
+ */
+function verificarTokenTecnico(req, res, next) {
+  const authHeader = req.headers['authorization'];
+  const token = authHeader && authHeader.split(' ')[1]; // Bearer TOKEN
+  
+  if (!token) {
+    return res.status(401).json({ 
+      success: false, 
+      message: 'Token no proporcionado' 
+    });
+  }
+  
+  jwt.verify(token, process.env.JWT_SECRETO, (err, decoded) => {
+    if (err) {
+      logger.warn(`[security] Token inválido: ${err.message}`);
+      return res.status(403).json({ 
+        success: false, 
+        message: 'Token inválido o expirado' 
+      });
+    }
+    
+    // Verificar que sea un técnico
+    if (decoded.role !== 'tecnico') {
+      return res.status(403).json({ 
+        success: false, 
+        message: 'Acceso no autorizado' 
+      });
+    }
+    
+    // Adjuntar datos del técnico al request
+    req.tecnico = decoded;
+    next();
+  });
+}
+
+/**
+ * Middleware para verificar JWT (cualquier usuario autenticado)
+ * Más permisivo que verificarTokenTecnico
+ */
+function verificarToken(req, res, next) {
+  const authHeader = req.headers['authorization'];
+  const token = authHeader && authHeader.split(' ')[1];
+  
+  if (!token) {
+    return res.status(401).json({ 
+      success: false, 
+      message: 'Token no proporcionado' 
+    });
+  }
+  
+  jwt.verify(token, process.env.JWT_SECRETO, (err, decoded) => {
+    if (err) {
+      return res.status(403).json({ 
+        success: false, 
+        message: 'Token inválido o expirado' 
+      });
+    }
+    
+    req.usuario = decoded;
+    next();
+  });
+}
+
 module.exports = {
   configurarHelmet,
   limiterGeneral,
@@ -231,5 +298,7 @@ module.exports = {
   sanitizarInputs,
   prevenirParameterPollution,
   validarFormatoIds,
-  logRequestsSospechosos
+  logRequestsSospechosos,
+  verificarTokenTecnico,
+  verificarToken
 };

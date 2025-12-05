@@ -1,19 +1,24 @@
 // Main API server entry point
 const path = require('path');
-// Load .env from backend folder FIRST before importing modules that read process.env
-require('dotenv').config({ path: path.join(__dirname, '..', '.env') });
+// Load environment configuration (includes dotenv)
+const env = require('./config/env');
 
 // Structured logging using Winston
 const { logger, expressLogger, logSecurity, logError, logAdmin } = require('./config/logger');
 
+// Swagger/OpenAPI documentation
+const swaggerUi = require('swagger-ui-express');
+const swaggerSpec = require('./config/swagger');
+
 const axios = require('axios');
 const { validarTecnico, listarTecnicos, agregarTecnico, eliminarTecnico } = require('./usuario');
-const { cache, getFromCache, setInCache } = require('./cache/cacheStore');
+const { cache, getFromCache, setInCache, getAllCacheStats, clearAllCaches, pruneAllCaches } = require('./cache/cacheStore');
 const { getOrganizations, getNetworks, getNetworkDevices, getNetworkTopology, getNetworkTopologyLinkLayer, getNetworkTopologyNetworkLayer, getApplianceStatuses, getOrganizationDevicesStatuses, getOrganizationDevices, getNetworkInfo, getOrgSwitchPortsTopologyDiscoveryByDevice, getNetworkApplianceConnectivityMonitoringDestinations, getNetworkWirelessSSIDs, getNetworkWirelessSSID, getOrgWirelessDevicesRadsecAuthorities, getOrgWirelessSignalQualityByNetwork, getOrgWirelessSignalQualityByDevice, getOrgWirelessSignalQualityByClient, getNetworkWirelessSignalQualityHistory, getDeviceLldpCdp, getNetworkSwitchPortsStatuses, getDeviceSwitchPortsStatuses, getOrgApplianceUplinksStatuses, getOrgTopAppliancesByUtilization, getOrgDevicesUplinksAddressesByDevice, getOrganizationUplinksStatuses, getAppliancePerformance, getDeviceAppliancePerformance, getApplianceUplinks, getDeviceUplink, getApplianceClientSecurity, getOrganizationApplianceSecurityIntrusion, getApplianceTrafficShaping, getNetworkClientsBandwidthUsage, getNetworkApplianceSecurityMalware, getAppliancePorts, getDeviceAppliancePortsStatuses, getOrgApplianceUplinksLossAndLatency, getOrgApplianceUplinksUsageByDevice, getDeviceSwitchPorts, getNetworkSwitchAccessControlLists, getOrgSwitchPortsBySwitch, getNetworkSwitchStackRoutingInterfaces, getNetworkCellularGatewayConnectivityMonitoringDestinations, getDeviceWirelessConnectionStats, getNetworkWirelessConnectionStats, getNetworkWirelessLatencyStats, getDeviceWirelessLatencyStats, getNetworkWirelessFailedConnections, getDeviceLossAndLatencyHistory, getOrgDevicesUplinksLossAndLatency, getOrgWirelessDevicesPacketLossByClient, getOrgWirelessDevicesPacketLossByDevice, getNetworkApplianceConnectivityMonitoringDests, getNetworkAppliancePortsConfig, getOrgApplianceUplinkStatuses, getNetworkApplianceVlans, getNetworkApplianceVlan, getNetworkApplianceSettings, getOrgApplianceSdwanInternetPolicies, getOrgUplinksStatuses, getDeviceApplianceUplinksSettings, getNetworkApplianceTrafficShapingUplinkSelection, getOrgApplianceUplinksUsageByNetwork, getNetworkApplianceUplinksUsageHistory, getOrgApplianceUplinksStatusesOverview, getOrgWirelessDevicesEthernetStatuses, getOrgDevicesAvailabilitiesChangeHistory } = require('./merakiApi');
 const { toGraphFromLinkLayer, toGraphFromDiscoveryByDevice, toGraphFromLldpCdp, buildTopologyFromLldp } = require('./transformers');
 const { findPredio, searchPredios, getNetworkIdForPredio, getPredioInfoForNetwork, refreshCache, getStats } = require('./prediosManager');
 const { warmUpFrequentPredios, getTopPredios } = require('./warmCache');
 const { startPrediosAutoRefresh, syncPrediosCsv, getLastRunSummary } = require('./prediosUpdater');
+const { enrichAppliancePortsWithSwitchConnectivity } = require('./utils/applianceEnrichment');
 const express = require('express');
 const cors = require('cors');
 const rutas = require('./rutas');
@@ -30,9 +35,17 @@ const {
   validarFormatoIds,
   logRequestsSospechosos
 } = require('./middleware/security');
+const {
+  validateLogin,
+  validateAdminLogin,
+  validateCreateTecnico,
+  validateNetworkId,
+  validateSearch,
+  validateTimespan
+} = require('./middleware/validation');
 
 const app = express();
-const puerto = process.env.PUERTO || 3000;
+const puerto = env.PORT;
 
 // Process large lists with controlled concurrency to avoid memory spikes
 async function processInBatches(items, batchSize, processFn) {
@@ -45,11 +58,13 @@ async function processInBatches(items, batchSize, processFn) {
   return results;
 }
 
-const host = process.env.HOST || '0.0.0.0';
+// enrichAppliancePortsWithSwitchConnectivity importada de ./utils/applianceEnrichment
+
+const host = env.HOST;
 
 // Configure proxy headers for reverse proxy setups (Nginx, Cloudflare, etc)
 // Set explicitly rather than 'true' for security - Cloudflare typically uses 1 hop
-app.set('trust proxy', Number(process.env.TRUST_PROXY_HOPS) || 1);
+app.set('trust proxy', env.server.trustProxyHops);
 
 // ========== SECURITY MIDDLEWARE STACK ==========
 
@@ -60,19 +75,19 @@ app.use(configurarHelmet());
 const corsOptions = {
   origin: function (origin, callback) {
     // Allow all origins if explicitly configured via environment variable
-    if (process.env.CORS_ORIGINS === '*') {
+    if (env.cors.allowAll) {
       callback(null, true);
       return;
     }
     
     // Development mode: more permissive to allow local testing across ports
-    if (process.env.NODE_ENV !== 'production') {
+    if (env.IS_DEVELOPMENT) {
       callback(null, true);
       return;
     }
     
     // Production mode: enforce whitelist of allowed domains
-    const allowedOrigins = process.env.CORS_ORIGINS?.split(',') || [
+    const allowedOrigins = env.cors.originsArray || [
       'http://localhost:5173',
       'http://localhost:5174',
       'https://portal-meraki.tu-empresa.com'
@@ -94,25 +109,40 @@ app.use(cors(corsOptions));
 app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ extended: true, limit: '10mb' }));
 
+// Swagger UI - documentación de la API
+app.use('/api/docs', swaggerUi.serve, swaggerUi.setup(swaggerSpec, {
+  customCss: '.swagger-ui .topbar { display: none }',
+  customSiteTitle: 'Portal Meraki API Docs'
+}));
+
+// JSON spec para herramientas externas
+app.get('/api/docs.json', (req, res) => {
+  res.setHeader('Content-Type', 'application/json');
+  res.send(swaggerSpec);
+});
+
 // Endpoint para login de técnicos (mover después de inicializar 'app')
-app.post('/api/login', limiterAuth, (req, res) => {
+app.post('/api/login', limiterAuth, validateLogin, async (req, res) => {
   const { username, password } = req.body;
-  if (validarTecnico(username, password)) {
-    res.json({ success: true });
-  } else {
-    res.status(401).json({ success: false, message: 'Credenciales inválidas' });
+  try {
+    const isValid = await validarTecnico(username, password);
+    if (isValid) {
+      res.json({ success: true });
+    } else {
+      res.status(401).json({ success: false, message: 'Credenciales inválidas' });
+    }
+  } catch (error) {
+    logger.error('Error en login:', { error: error.message });
+    res.status(500).json({ success: false, message: 'Error interno' });
   }
 });
 
-app.post('/api/admin/login', limiterAuth, (req, res) => {
+app.post('/api/admin/login', limiterAuth, validateAdminLogin, (req, res) => {
   const { key } = req.body || {};
-  if (!process.env.ADMIN_KEY) {
+  if (!env.ADMIN_KEY) {
     return res.status(500).json({ success: false, message: 'ADMIN_KEY no configurada' });
   }
-  if (!key) {
-    return res.status(400).json({ success: false, message: 'Clave requerida' });
-  }
-  if (key === process.env.ADMIN_KEY) {
+  if (key === env.ADMIN_KEY) {
     return res.json({ success: true });
   }
   return res.status(401).json({ success: false, message: 'Clave incorrecta' });
@@ -122,8 +152,8 @@ app.post('/api/admin/login', limiterAuth, (req, res) => {
 function requireAdmin(req, res, next) {
   // aceptar clave en header x-admin-key o en body.adminKey para facilitar pruebas
   const key = req.headers['x-admin-key'] || (req.body && req.body.adminKey) || req.query.adminKey;
-  if (!process.env.ADMIN_KEY) return res.status(500).json({ error: 'ADMIN_KEY no configurada' });
-  if (key !== process.env.ADMIN_KEY) return res.status(401).json({ error: 'No autorizado' });
+  if (!env.ADMIN_KEY) return res.status(500).json({ error: 'ADMIN_KEY no configurada' });
+  if (key !== env.ADMIN_KEY) return res.status(401).json({ error: 'No autorizado' });
   next();
 }
 
@@ -132,19 +162,19 @@ function isAdmin(req) {
   const hdr = req.headers['x-admin-key'];
   const q = req.query.adminKey || (req.body && req.body.adminKey);
   const key = hdr || q;
-  if (process.env.ADMIN_KEY && key === process.env.ADMIN_KEY) return true;
+  if (env.ADMIN_KEY && key === env.ADMIN_KEY) return true;
   // Allow in local development if ADMIN_KEY is not set
-  if (!process.env.ADMIN_KEY) return true;
+  if (!env.ADMIN_KEY) return true;
   return false;
 }
 
 // LLDP + Topología (diagnóstico de conectividad)
-app.get('/api/debug/topology/:networkId', requireAdmin, limiterDatos, async (req, res) => {
+app.get('/api/debug/topology/:networkId', requireAdmin, limiterDatos, validateNetworkId, async (req, res) => {
   if (!isAdmin(req)) return res.status(401).json({ error: 'No autorizado (x-admin-key o adminKey requerido)' });
   const { networkId } = req.params;
   
   try {
-    console.debug('Iniciando análisis de topología y LLDP...');
+    logger.debug('Iniciando análisis de topología y LLDP...');
     
     // Obtener dispositivos y topología
     const [devices, topology] = await Promise.all([
@@ -155,7 +185,7 @@ app.get('/api/debug/topology/:networkId', requireAdmin, limiterDatos, async (req
     const switches = devices.filter(d => d.model?.startsWith('MS'));
     const mxDevice = devices.find(d => d.model?.startsWith('MX'));
     
-    console.debug(`Switches: ${switches.length}, MX: ${mxDevice ? mxDevice.serial : 'NO ENCONTRADO'}`);
+    logger.debug(`Switches: ${switches.length}, MX: ${mxDevice ? mxDevice.serial : 'NO ENCONTRADO'}`);
     
     // Query LLDP data for each switch
     const lldpData = {};
@@ -164,10 +194,10 @@ app.get('/api/debug/topology/:networkId', requireAdmin, limiterDatos, async (req
         const lldpInfo = await getDeviceLldpCdp(sw.serial);
         if (lldpInfo && lldpInfo.ports) {
           lldpData[sw.serial] = lldpInfo;
-          console.debug(`LLDP obtenido para ${sw.serial}: ${Object.keys(lldpInfo.ports).length} puertos`);
+          logger.debug(`LLDP obtenido para ${sw.serial}: ${Object.keys(lldpInfo.ports).length} puertos`);
         }
       } catch (err) {
-        console.error(`Error LLDP para ${sw.serial}:`, err.message);
+        logger.error(`Error LLDP para ${sw.serial}:`, { error: err.message });
       }
     }
     
@@ -175,7 +205,7 @@ app.get('/api/debug/topology/:networkId', requireAdmin, limiterDatos, async (req
     const topologyAnalysis = [];
     if (topology && topology.links && mxDevice) {
       const mxSerial = mxDevice.serial.toUpperCase();
-      console.debug(`Analizando ${topology.links.length} enlaces en topología...`);
+      logger.debug(`Analizando ${topology.links.length} enlaces en topología...`);
       
       for (const link of topology.links) {
         const src = (link.source || link.from || link.a || '').toString().toUpperCase();
@@ -204,7 +234,7 @@ app.get('/api/debug/topology/:networkId', requireAdmin, limiterDatos, async (req
               fullLink: link
             });
             
-            console.info(`Enlace detectado: ${sw.name} Puerto ${swPortMatch ? swPortMatch[1] : '?'} → MX Puerto ${portMatch ? portMatch[1] : '?'}`);
+            logger.info(`Enlace detectado: ${sw.name} Puerto ${swPortMatch ? swPortMatch[1] : '?'} → MX Puerto ${portMatch ? portMatch[1] : '?'}`);
           }
         }
       }
@@ -229,7 +259,7 @@ app.get('/api/debug/topology/:networkId', requireAdmin, limiterDatos, async (req
     });
     
     } catch (error) {
-    console.error('Error topología:', error.message);
+    logger.error('Error topología:', { error: error.message });
     res.status(500).json({ error: error.message });
   }
 });
@@ -354,6 +384,30 @@ app.post('/api/cache/clear', requireAdmin, limiterEscritura, (req, res) => {
   try {
     const networkId = (req.body && req.body.networkId) || req.query.networkId || null;
     const kind = ((req.body && req.body.kind) || req.query.kind || 'lldp').toString();
+    
+    // Clear all caches
+    if (kind === 'all') {
+      const statsBefore = getAllCacheStats();
+      clearAllCaches();
+      return res.json({ 
+        ok: true, 
+        cleared: 'all', 
+        statsBefore,
+        statsAfter: getAllCacheStats()
+      });
+    }
+    
+    // Prune expired entries
+    if (kind === 'prune') {
+      const pruned = pruneAllCaches();
+      return res.json({ ok: true, pruned });
+    }
+    
+    // Get cache stats
+    if (kind === 'stats') {
+      return res.json({ ok: true, stats: getAllCacheStats() });
+    }
+    
     if (kind === 'lldp') {
       if (networkId) {
         cache.lldpByNetwork.delete(networkId);
@@ -383,16 +437,16 @@ app.post('/api/cache/clear', requireAdmin, limiterEscritura, (req, res) => {
       return res.json({ ok: true, cleared: `${kind}:all` });
     }
 
-    return res.status(400).json({ error: 'kind desconocido. Usa lldp|topology|networks|switchPorts|accessPoints|appliance' });
+    return res.status(400).json({ error: 'kind desconocido. Usa all|prune|stats|lldp|topology|networks|switchPorts|accessPoints|appliance' });
   } catch (e) {
-    console.error('Error invalidando caché:', e?.message || e);
+    logger.error('Error invalidando caché:', { error: e?.message || e });
     return res.status(500).json({ error: 'Error invalidando caché' });
   }
 });
 
 
 // Buscar predios (networks) por texto
-app.get('/api/networks/search', async (req, res) => {
+app.get('/api/networks/search', validateSearch, async (req, res) => {
   try {
     const qRaw = (req.query.q || '').toString().trim();
     if (!qRaw) return res.json([]);
@@ -409,7 +463,7 @@ app.get('/api/networks/search', async (req, res) => {
       } catch {}
     }
 
-    const orgIdEnv = process.env.MERAKI_ORG_ID;
+    const orgIdEnv = env.MERAKI_ORG_ID;
     let orgs = [];
     if (orgIdEnv) {
       orgs = [{ id: orgIdEnv, name: '' }];
@@ -417,7 +471,7 @@ app.get('/api/networks/search', async (req, res) => {
       try {
         orgs = await getOrganizations();
       } catch (e) {
-        console.error('Error getOrganizations en /networks/search:', e.response?.status, e.response?.data || e.message);
+        logger.error('Error getOrganizations en /networks/search:', { status: e.response?.status, data: e.response?.data || e.message });
         return res.status(502).json({ error: 'La API key no permite listar organizaciones. Define MERAKI_ORG_ID en .env o usa un ID de network exacto (L_...).' });
       }
     }
@@ -431,7 +485,7 @@ app.get('/api/networks/search', async (req, res) => {
     }
     res.json(results.slice(0, 20));
   } catch (error) {
-    console.error('Error /api/networks/search', error.response?.status, error.response?.data || error.message);
+    logger.error('Error /api/networks/search', { status: error.response?.status, data: error.response?.data || error.message });
     res.status(500).json({ error: 'Error buscando redes' });
   }
 });
@@ -447,7 +501,7 @@ app.get('/api/resolve-network', async (req, res) => {
       return res.status(400).json({ error: 'Reemplaza NETWORK_ID por el ID real (por ej. L_1234567890).' });
     }
 
-  console.info(`Buscando predio: ${qRaw}`);
+  logger.info(`Buscando predio: ${qRaw}`);
     const startTime = Date.now();
 
     // Detectar si es MAC address (VERIFICAR PRIMERO antes que Serial)
@@ -631,7 +685,7 @@ app.get('/api/resolve-network', async (req, res) => {
             getNetworkSwitchPortsStatuses(networkId)
           ]);
           } catch (backgroundError) {
-          console.warn(`Error precargando datos para ${networkId}:`, backgroundError.message);
+          logger.warn(`Error precargando datos para ${networkId}:`, { error: backgroundError.message });
         }
       });
     };
@@ -654,7 +708,7 @@ app.get('/api/resolve-network', async (req, res) => {
     // 1. Intentar resolver por CSV (código de predio o network_id) - INSTANTÁNEO
     const predioInfo = findPredio(qRaw);
     if (predioInfo && predioInfo.network_id) {
-  console.info(`Predio encontrado en CSV: ${predioInfo.network_id} (${Date.now() - startTime}ms)`);
+  logger.info(`Predio encontrado en CSV: ${predioInfo.network_id} (${Date.now() - startTime}ms)`);
       
       // Construir network object desde CSV sin llamadas API adicionales
       const networkFromCSV = {
@@ -674,7 +728,7 @@ app.get('/api/resolve-network', async (req, res) => {
       // Trigger warmup en background
       triggerWarmup(predioInfo.network_id, predioInfo.organization_id);
 
-  console.info(`Respuesta instantánea desde CSV (${Date.now() - startTime}ms)`);
+  logger.info(`Respuesta instantánea desde CSV (${Date.now() - startTime}ms)`);
       return res.json({
         source: 'csv-instant',
         cached: true,
@@ -703,7 +757,7 @@ app.get('/api/resolve-network', async (req, res) => {
           cached: Boolean(cachedNetwork),
         });
       } catch (netErr) {
-  console.warn(`No se pudo resolver network ${qRaw} directamente:`, netErr.message);
+  logger.warn(`No se pudo resolver network ${qRaw} directamente:`, { error: netErr.message });
       }
     }
 
@@ -730,12 +784,12 @@ app.get('/api/resolve-network', async (req, res) => {
           });
         }
       } catch (csvErr) {
-  console.warn(`No se pudo obtener network para predio ${predioInfo.predio_code}:`, csvErr.message);
+  logger.warn(`No se pudo obtener network para predio ${predioInfo.predio_code}:`, { error: csvErr.message });
       }
     }
 
     // 4. Fallback: recorrer organizaciones disponibles y buscar coincidencias exactas por nombre o ID
-    const orgIdEnv = process.env.MERAKI_ORG_ID;
+    const orgIdEnv = env.MERAKI_ORG_ID;
     let orgs = [];
     if (orgIdEnv) {
       orgs = [{ id: orgIdEnv, name: '' }];
@@ -743,7 +797,7 @@ app.get('/api/resolve-network', async (req, res) => {
       try {
         orgs = await getOrganizations();
       } catch (e) {
-        console.error('Error getOrganizations en /resolve-network:', e.response?.status, e.response?.data || e.message);
+        logger.error('Error getOrganizations en /resolve-network:', { status: e.response?.status, data: e.response?.data || e.message });
         return res.status(502).json({ error: 'La API key no permite listar organizaciones. Define MERAKI_ORG_ID en .env o usa un ID de network exacto (L_...).' });
       }
     }
@@ -774,32 +828,32 @@ app.get('/api/resolve-network', async (req, res) => {
 
     return res.status(404).json({ error: 'Predio no encontrado' });
   } catch (error) {
-    console.error('Error /api/resolve-network', error.response?.status, error.response?.data || error.message);
+    logger.error('Error /api/resolve-network', { status: error.response?.status, data: error.response?.data || error.message });
     res.status(500).json({ error: 'Error resolviendo predio' });
   }
 });
 
 // Endpoint para carga por sección (lazy)
-app.get('/api/networks/:networkId/section/:sectionKey', async (req, res) => {
+app.get('/api/networks/:networkId/section/:sectionKey', validateNetworkId, async (req, res) => {
   const { networkId, sectionKey } = req.params;
   const { query = {} } = req;
   const startTime = Date.now();
   
-  console.log(`[SECTION-ENDPOINT] START: ${sectionKey} for ${networkId}`);
+  logger.debug(`[SECTION-ENDPOINT] START: ${sectionKey} for ${networkId}`);
   
   try {
-  console.debug(`Cargando sección '${sectionKey}' para network ${networkId}`);
+  logger.debug(`Cargando sección '${sectionKey}' para network ${networkId}`);
     
     const uplinkTimespan = Number(query.uplinkTimespan) || 24 * 3600;
     const uplinkResolution = Number(query.uplinkResolution) || 300;
     
-    console.log(`[SECTION-ENDPOINT] Getting network info...`);
+    logger.debug(`[SECTION-ENDPOINT] Getting network info...`);
     // Obtener datos básicos de la red
     const network = await getNetworkInfo(networkId);
     const orgId = network?.organizationId;
-    console.log(`[SECTION-ENDPOINT] Getting devices...`);
+    logger.debug(`[SECTION-ENDPOINT] Getting devices...`);
     const devices = await getNetworkDevices(networkId);
-    console.log(`[SECTION-ENDPOINT] Got ${devices.length} devices`);
+    logger.debug(`[SECTION-ENDPOINT] Got ${devices.length} devices`);
     
     const statusMap = new Map();
     const deviceStatuses = await getOrganizationDevicesStatuses(orgId, { 'networkIds[]': networkId });
@@ -816,7 +870,7 @@ app.get('/api/networks/:networkId/section/:sectionKey', async (req, res) => {
     switch (sectionKey) {
       case 'topology': {
         // Solo topología básica
-        const rawTopology = await getNetworkTopology_LinkLayer(networkId);
+        const rawTopology = await getNetworkTopologyLinkLayer(networkId);
         const topology = toGraphFromLinkLayer(rawTopology, statusMap);
         result.topology = topology;
         result.devices = devices.map(d => ({
@@ -844,7 +898,7 @@ app.get('/api/networks/:networkId/section/:sectionKey', async (req, res) => {
         try {
           switchAcls = await getNetworkSwitchAccessControlLists(networkId);
           } catch (err) {
-          console.warn('ACLs no disponibles:', err.message);
+          logger.warn('ACLs no disponibles:', { error: err.message });
         }
         
         // Obtener configuración detallada de puertos por switch
@@ -854,7 +908,7 @@ app.get('/api/networks/:networkId/section/:sectionKey', async (req, res) => {
             const ports = await getDeviceSwitchPorts(sw.serial);
             detailedPortsMap[sw.serial] = ports;
           } catch (err) {
-            console.warn(`No se pudo obtener config de puertos para ${sw.serial}`);
+            logger.warn(`No se pudo obtener config de puertos para ${sw.serial}`);
             detailedPortsMap[sw.serial] = [];
           }
         }
@@ -887,11 +941,40 @@ app.get('/api/networks/:networkId/section/:sectionKey', async (req, res) => {
             };
           });
           
+          // Determinar razón del estado alerting/warning para el switch
+          const deviceStatus = statusMap.get(sw.serial);
+          const rawStatus = deviceStatus?.status || sw.status || '';
+          let statusReason = null;
+          
+          if (/alerting|warning|degraded/i.test(rawStatus)) {
+            const reasons = [];
+            
+            // Verificar puertos con errores o warnings
+            const portsWithErrors = portsEnriched.filter(p => p.errors?.length > 0);
+            const portsWithWarnings = portsEnriched.filter(p => p.warnings?.length > 0);
+            
+            if (portsWithErrors.length > 0) {
+              reasons.push(`${portsWithErrors.length} puerto(s) con errores`);
+            }
+            if (portsWithWarnings.length > 0) {
+              reasons.push(`${portsWithWarnings.length} puerto(s) con advertencias`);
+            }
+            
+            // Verificar uplinks caídos
+            const uplinksDown = portsEnriched.filter(p => p.isUplink && p.status !== 'Connected');
+            if (uplinksDown.length > 0) {
+              reasons.push(`${uplinksDown.length} uplink(s) desconectado(s)`);
+            }
+            
+            statusReason = reasons.length > 0 ? reasons.join(', ') : 'Estado en alerta (verificar en Dashboard Meraki)';
+          }
+          
           return {
             serial: sw.serial,
             name: sw.name,
             model: sw.model,
-            status: statusMap.get(sw.serial)?.status || sw.status,
+            status: rawStatus,
+            statusReason,
             mac: sw.mac,
             lanIp: sw.lanIp,
             ports: portsEnriched,
@@ -920,12 +1003,12 @@ app.get('/api/networks/:networkId/section/:sectionKey', async (req, res) => {
       }
       
       case 'access_points': {
-  console.debug('Procesando puntos de acceso para', networkId);
+  logger.debug('Procesando puntos de acceso para', networkId);
         // Datos de APs con LLDP y estadísticas wireless mejoradas
         const lldpSnapshots = {};
         const wirelessStats = {};
         
-  console.debug(`Total de APs encontrados: ${accessPoints.length}`);
+  logger.debug(`Total de APs encontrados: ${accessPoints.length}`);
         
         // Obtener estado de ethernet de todos los APs wireless desde la organización
         let wirelessEthernetStatuses = [];
@@ -933,17 +1016,17 @@ app.get('/api/networks/:networkId/section/:sectionKey', async (req, res) => {
           try {
             const params = { 'networkIds[]': networkId };
             wirelessEthernetStatuses = await getOrgWirelessDevicesEthernetStatuses(orgId, params);
-            console.log(`\n✓ Obtenidos ${wirelessEthernetStatuses.length} wireless ethernet statuses`);
+            logger.debug(`\n✓ Obtenidos ${wirelessEthernetStatuses.length} wireless ethernet statuses`);
             if (wirelessEthernetStatuses.length > 0) {
               wirelessEthernetStatuses.forEach(status => {
                 const speed = status.ports?.[0]?.linkNegotiation?.speed || '?';
                 const duplex = status.ports?.[0]?.linkNegotiation?.duplex || '?';
                 const poeStandard = status.ports?.[0]?.poe?.standard || 'N/A';
-                console.log(`  • ${status.serial}: ${speed} Mbps ${duplex} duplex (PoE: ${poeStandard})`);
+                logger.debug(`  • ${status.serial}: ${speed} Mbps ${duplex} duplex (PoE: ${poeStandard})`);
               });
             }
           } catch (err) {
-            console.warn('No se pudo obtener wireless ethernet statuses:', err.message);
+            logger.warn('No se pudo obtener wireless ethernet statuses:', { error: err.message });
           }
         }
         
@@ -952,14 +1035,14 @@ app.get('/api/networks/:networkId/section/:sectionKey', async (req, res) => {
         try {
           networkWirelessStats = await getNetworkWirelessConnectionStats(networkId, { timespan: 3600 }); // Última hora
         } catch (err) {
-          console.warn('Estadísticas wireless de la red no disponibles');
+          logger.warn('Estadísticas wireless de la red no disponibles');
         }
         
         const cachedLldpMap = getFromCache(cache.lldpByNetwork, networkId, 'lldp') || {};
         
         // Paralelizar consultas LLDP con concurrencia limitada (8 requests/lote)
         // Evita rate limiting de Meraki API con predios grandes (45+ APs)
-        console.log(`Consultando LLDP/CDP para ${accessPoints.length} APs en lotes de 8...`);
+        logger.debug(`Consultando LLDP/CDP para ${accessPoints.length} APs en lotes de 8...`);
         const lldpResults = await processInBatches(
           accessPoints,
           8, // Lotes de 8 requests paralelos
@@ -968,7 +1051,7 @@ app.get('/api/networks/:networkId/section/:sectionKey', async (req, res) => {
               const info = cachedLldpMap[ap.serial] || await getDeviceLldpCdp(ap.serial);
               if (info) return { serial: ap.serial, info };
             } catch (err) {
-              console.warn(`LLDP no disponible para ${ap.serial}`);
+              logger.warn(`LLDP no disponible para ${ap.serial}`);
             }
             return { serial: ap.serial, info: null };
           }
@@ -979,7 +1062,7 @@ app.get('/api/networks/:networkId/section/:sectionKey', async (req, res) => {
         });
         
         // Paralelizar estadísticas wireless con concurrencia limitada
-        console.log(`Consultando wireless stats para ${accessPoints.length} APs en lotes de 8...`);
+        logger.debug(`Consultando wireless stats para ${accessPoints.length} APs en lotes de 8...`);
         const statsResults = await processInBatches(
           accessPoints,
           8,
@@ -988,7 +1071,7 @@ app.get('/api/networks/:networkId/section/:sectionKey', async (req, res) => {
               const connStats = await getDeviceWirelessConnectionStats(ap.serial, { timespan: 3600 });
               if (connStats) return { serial: ap.serial, stats: connStats };
             } catch (err) {
-              console.warn(`Wireless stats no disponibles para ${ap.serial}`);
+              logger.warn(`Wireless stats no disponibles para ${ap.serial}`);
             }
             return { serial: ap.serial, stats: null };
           }
@@ -1034,7 +1117,7 @@ app.get('/api/networks/:networkId/section/:sectionKey', async (req, res) => {
             }
           }
           const connectedTo = (switchName && portNum) ? `${switchName}/Port ${portNum}`.replace(/^([a-z])/, (match) => match.toUpperCase()).replace(/switch/i, 'SWITCH') : (switchName || '-')
-          let wiredSpeed = '1000 Mbps';
+          let wiredSpeed = null;  // Mostrar '-' hasta que tengamos datos reales
           
           // PRIORIDAD 1: Buscar en wireless ethernet statuses (más confiable, incluye APs offline)
           const ethernetStatus = wirelessEthernetStatuses.find(s => s.serial === ap.serial);
@@ -1049,6 +1132,58 @@ app.get('/api/networks/:networkId/section/:sectionKey', async (req, res) => {
               wiredSpeed = lldpData.portSpeed;
             }
           }
+
+          // Determinar razón del estado alerting/warning
+          const deviceStatus = statusMap.get(ap.serial);
+          const rawStatus = deviceStatus?.status || ap.status || '';
+          let statusReason = null;
+          
+          if (/alerting|warning|degraded/i.test(rawStatus)) {
+            // Posibles razones para APs en warning
+            const reasons = [];
+            
+            // Verificar problemas de conectividad ethernet
+            if (!ethernetStatus || !ethernetStatus.ports?.length) {
+              reasons.push('Sin datos de puerto Ethernet');
+            } else if (ethernetStatus.ports[0]?.poe?.power === 0) {
+              reasons.push('Sin alimentación PoE');
+            }
+            
+            // Verificar si no hay LLDP/CDP (problema de conexión con switch)
+            if (!port && !lldp) {
+              reasons.push('Sin conexión LLDP/CDP detectada');
+            }
+            
+            // Si hay estadísticas de conexión pobres
+            if (stats) {
+              const successRate = stats.assoc > 0 ? (stats.success / stats.assoc) * 100 : 0;
+              if (successRate < 80 && stats.assoc > 0) {
+                reasons.push(`Tasa de éxito baja: ${successRate.toFixed(0)}%`);
+              }
+            }
+            
+            statusReason = reasons.length > 0 ? reasons.join(', ') : 'Estado en alerta (verificar en Dashboard Meraki)';
+          }
+
+          const tooltipInfo = {
+            type: 'access-point',
+            name: ap.name || ap.serial,
+            model: ap.model,
+            serial: ap.serial,
+            mac: ap.mac,
+            firmware: ap.firmware,
+            lanIp: ap.lanIp,
+            status: rawStatus,
+            statusReason,
+            signalQuality: null,
+            clients: null,
+            microDrops: 0,
+            microDurationSeconds: 0,
+            connectedTo,
+            wiredPort: port?.cdp?.portId || port?.lldp?.portId || '-',
+            wiredSpeed,
+            power: ethernetStatus?.ports?.[0]?.poe?.power ?? null,
+          };
           
           return {
             serial: ap.serial,
@@ -1069,7 +1204,8 @@ app.get('/api/networks/:networkId/section/:sectionKey', async (req, res) => {
               successRate: stats.success && stats.assoc 
                 ? ((stats.success / stats.assoc) * 100).toFixed(1) + '%' 
                 : 'N/A'
-            } : null
+            } : null,
+            tooltipInfo,
           };
         });
         
@@ -1079,7 +1215,7 @@ app.get('/api/networks/:networkId/section/:sectionKey', async (req, res) => {
         const isGAPConfiguration = hasZ3Teleworker && !hasSwitches && result.accessPoints.length === 1;
         
         if (isGAPConfiguration) {
-          console.debug('[GAP] Configuración GAP detectada en carga inicial - corrigiendo puerto del AP a puerto 5');
+          logger.debug('[GAP] Configuración GAP detectada en carga inicial - corrigiendo puerto del AP a puerto 5');
           result.accessPoints = result.accessPoints.map(ap => {
             // Buscar el nombre del appliance/predio desde connectedTo
             const connectedDevice = ap.connectedTo.split('/')[0].trim();
@@ -1109,7 +1245,7 @@ app.get('/api/networks/:networkId/section/:sectionKey', async (req, res) => {
         // Agregar datos wireless completos con failedConnections para microcortes
         if (accessPoints.length > 0 && orgId) {
           try {
-              console.debug(`Cargando métricas wireless con fallas para ${accessPoints.length} APs`);
+              logger.debug(`Cargando métricas wireless con fallas para ${accessPoints.length} APs`);
             const wirelessParams = { 'networkIds[]': networkId, timespan: DEFAULT_WIRELESS_TIMESPAN };
             const [signalByDevice, signalHistory, failedConnections] = await Promise.allSettled([
               getOrgWirelessSignalQualityByDevice(orgId, wirelessParams),
@@ -1117,10 +1253,10 @@ app.get('/api/networks/:networkId/section/:sectionKey', async (req, res) => {
               getNetworkWirelessFailedConnections(networkId, { timespan: DEFAULT_WIRELESS_TIMESPAN })
             ]);
             
-            console.debug(`failedConnections - estado: ${failedConnections.status}, longitud: ${failedConnections.status === 'fulfilled' && Array.isArray(failedConnections.value) ? failedConnections.value.length : 'N/A'}`);
+            logger.debug(`failedConnections - estado: ${failedConnections.status}, longitud: ${failedConnections.status === 'fulfilled' && Array.isArray(failedConnections.value) ? failedConnections.value.length : 'N/A'}`);
             
-            // Aplicar composeWirelessMetrics directamente a result.accessPoints
-            composeWirelessMetrics({
+            // Aplicar composeWirelessMetrics y fusionar resultados en los APs de la respuesta
+            const wirelessInsights = composeWirelessMetrics({
               accessPoints: result.accessPoints,
               networkId,
               signalByDeviceRaw: signalByDevice.status === 'fulfilled' ? signalByDevice.value : [],
@@ -1131,9 +1267,59 @@ app.get('/api/networks/:networkId/section/:sectionKey', async (req, res) => {
               timespanSeconds: DEFAULT_WIRELESS_TIMESPAN,
             });
             
-            console.debug(`Métricas wireless aplicadas a ${result.accessPoints.length} APs`);
+            if (wirelessInsights) {
+              const insightsBySerial = new Map();
+              const devicesWithWireless = Array.isArray(wirelessInsights.devices) ? wirelessInsights.devices : [];
+              devicesWithWireless.forEach((device) => {
+                if (device?.serial) {
+                  insightsBySerial.set(device.serial, device);
+                }
+              });
+              if (wirelessInsights.summary) {
+                result.wirelessSummary = wirelessInsights.summary;
+              }
+              result.accessPoints = result.accessPoints.map((ap) => {
+                const wirelessDetail = insightsBySerial.get(ap.serial);
+                if (!wirelessDetail) return ap;
+                const updatedTooltip = {
+                  type: ap.tooltipInfo?.type || 'access-point',
+                  name: ap.tooltipInfo?.name || ap.name || ap.serial,
+                  model: ap.tooltipInfo?.model || ap.model,
+                  serial: ap.tooltipInfo?.serial || ap.serial,
+                  mac: ap.tooltipInfo?.mac || ap.mac,
+                  firmware: ap.tooltipInfo?.firmware ?? ap.firmware,
+                  lanIp: ap.tooltipInfo?.lanIp ?? ap.lanIp,
+                  status: ap.tooltipInfo?.status || ap.status,
+                  signalQuality: wirelessDetail.signalSummary?.latest ?? wirelessDetail.signalSummary?.average ?? ap.tooltipInfo?.signalQuality ?? null,
+                  clients: Array.isArray(wirelessDetail.clients) ? wirelessDetail.clients.length : ap.tooltipInfo?.clients,
+                  microDrops: wirelessDetail.signalSummary?.microDrops ?? ap.tooltipInfo?.microDrops ?? 0,
+                  microDurationSeconds: wirelessDetail.signalSummary?.microDurationSeconds ?? ap.tooltipInfo?.microDurationSeconds ?? 0,
+                  connectedTo: ap.tooltipInfo?.connectedTo ?? ap.connectedTo,
+                  wiredPort: ap.tooltipInfo?.wiredPort ?? ap.connectedPort,
+                  wiredSpeed: ap.tooltipInfo?.wiredSpeed ?? ap.wiredSpeed,
+                  power: ap.tooltipInfo?.power ?? null,
+                };
+                return {
+                  ...ap,
+                  wireless: {
+                    signalSummary: wirelessDetail.signalSummary,
+                    history: wirelessDetail.history,
+                    microDrops: wirelessDetail.microDrops,
+                    microDurationSeconds: wirelessDetail.microDurationSeconds,
+                    deviceAggregate: wirelessDetail.deviceAggregate,
+                    failedConnections: wirelessDetail.failedConnections,
+                    failureHistory: wirelessDetail.failureHistory,
+                    clients: wirelessDetail.clients,
+                  },
+                  tooltipInfo: updatedTooltip,
+                };
+              });
+              logger.debug(`Métricas wireless aplicadas a ${devicesWithWireless.length} APs`);
+            } else {
+              logger.debug('composeWirelessMetrics no devolvió datos para los APs');
+            }
           } catch (wirelessError) {
-            console.warn('Error cargando métricas wireless:', wirelessError.message);
+            logger.warn('Error cargando métricas wireless:', { error: wirelessError.message });
           }
         }
         
@@ -1141,20 +1327,67 @@ app.get('/api/networks/:networkId/section/:sectionKey', async (req, res) => {
       }
       
       case 'appliance_status': {
-        // Datos del appliance con métricas mejoradas
+        // Datos del appliance con metricas mejoradas
         if (!mxDevice && !utmDevices.length && !teleworkerDevices.length) {
           return res.json({ ...result, message: 'No hay appliances en esta red' });
         }
         
-        const appliancePorts = await getAppliancePorts(networkId);
+        const appliancePortsConfig = await getAppliancePorts(networkId);
         const applianceUplinksRaw = await getOrganizationUplinksStatuses(orgId, { 'networkIds[]': networkId });
+        
+        // Get real-time port statuses for each appliance
+        const appliances = [mxDevice, ...utmDevices, ...teleworkerDevices].filter(Boolean);
+        const portStatusesBySerial = {};
+        
+        for (const device of appliances) {
+          try {
+            const statuses = await getDeviceAppliancePortsStatuses(device.serial);
+            if (Array.isArray(statuses)) {
+              portStatusesBySerial[device.serial] = statuses;
+            }
+          } catch (err) {
+            logger.warn(`Port statuses not available for ${device.serial}: ${err.message}`);
+          }
+        }
+        
+        // Merge port config with real-time statuses
+        const mergePortData = (serial) => {
+          const config = appliancePortsConfig.filter(p => p.serial === serial || !p.serial);
+          const statuses = portStatusesBySerial[serial] || [];
+          
+          // Create a map of statuses by port number
+          const statusMap = new Map();
+          statuses.forEach(s => {
+            const portNum = s.number || s.portId;
+            if (portNum != null) statusMap.set(portNum.toString(), s);
+          });
+          
+          // Merge config with status
+          return config.map(port => {
+            const portNum = (port.number || port.portId || '').toString();
+            const status = statusMap.get(portNum);
+            
+            if (status) {
+              const hasCarrier = status.carrier === true || status.speed > 0 || 
+                                 (status.status || '').toLowerCase() === 'connected';
+              return {
+                ...port,
+                ...status,
+                hasCarrier,
+                statusNormalized: hasCarrier ? 'connected' : 'disconnected',
+                speedLabel: status.speed ? `${status.speed} Mbps` : null
+              };
+            }
+            return port;
+          });
+        };
         
         // Obtener destinos de monitoreo de conectividad
         let connectivityDestinations = null;
         try {
           connectivityDestinations = await getNetworkApplianceConnectivityMonitoringDestinations(networkId);
         } catch (err) {
-          console.warn('Destinos de monitoreo de conectividad del appliance no disponibles');
+          logger.warn('Destinos de monitoreo de conectividad del appliance no disponibles');
         }
         
         // Para Z3/Teleworker, intentar obtener destinos de cellular gateway
@@ -1163,7 +1396,7 @@ app.get('/api/networks/:networkId/section/:sectionKey', async (req, res) => {
           try {
             cellularDestinations = await getNetworkCellularGatewayConnectivityMonitoringDestinations(networkId);
           } catch (err) {
-            console.warn('Destinos de monitoreo de cellular gateway no disponibles');
+            logger.warn('Destinos de monitoreo de cellular gateway no disponibles');
           }
         }
         
@@ -1182,10 +1415,8 @@ app.get('/api/networks/:networkId/section/:sectionKey', async (req, res) => {
           });
         });
         
-        const appliances = [mxDevice, ...utmDevices, ...teleworkerDevices].filter(Boolean);
-        
         // ============================================================================
-        // ENRIQUECER CON LOSS & LATENCY HISTORY PARA LA GRÁFICA DE CONECTIVIDAD
+        // ENRIQUECER CON LOSS & LATENCY HISTORY PARA LA GRAFICA DE CONECTIVIDAD
         // ============================================================================
         const lossAndLatencyBySerial = {};
         
@@ -1197,7 +1428,7 @@ app.get('/api/networks/:networkId/section/:sectionKey', async (req, res) => {
               const primaryDest = connectivityDestinations.destinations.find(d => d.default) || connectivityDestinations.destinations[0];
               const ip = primaryDest.ip;
               
-              console.debug(`Obteniendo historial de pérdida/latencia para ${device.serial} hacia ${ip}...`);
+              logger.debug(`Obteniendo historial de pérdida/latencia para ${device.serial} hacia ${ip}...`);
               
               const lossLatencyData = await getDeviceLossAndLatencyHistory(device.serial, {
                 ip: ip,
@@ -1213,13 +1444,13 @@ app.get('/api/networks/:networkId/section/:sectionKey', async (req, res) => {
                   startTs: entry.startTs,
                   endTs: entry.endTs
                 }));
-                console.debug(`${device.serial}: ${lossLatencyData.length} puntos de datos (loss/latency)`);
+                logger.debug(`${device.serial}: ${lossLatencyData.length} puntos de datos (loss/latency)`);
               } else {
-                console.warn(`${device.serial}: Sin datos de historial de pérdida/latencia`);
+                logger.warn(`${device.serial}: Sin datos de historial de pérdida/latencia`);
               }
             }
           } catch (err) {
-            console.error(`Error obteniendo historial loss/latency para ${device.serial}:`, err.message);
+            logger.error(`Error obteniendo historial loss/latency para ${device.serial}:`, { error: err.message });
           }
         }
         
@@ -1235,7 +1466,7 @@ app.get('/api/networks/:networkId/section/:sectionKey', async (req, res) => {
             productType: device.model?.startsWith('Z') ? 'teleworker' : 
                          device.model?.startsWith('MX') ? 'security_appliance' : 'utm'
           },
-          ports: appliancePorts.filter(p => p.serial === device.serial || !p.serial),
+          ports: mergePortData(device.serial),
           uplinks: uplinksBySerial[device.serial] || [],
           lossAndLatencyHistory: lossAndLatencyBySerial[device.serial] || []
         }));
@@ -1270,7 +1501,7 @@ app.get('/api/networks/:networkId/section/:sectionKey', async (req, res) => {
               const info = cachedLldpMapSwitches[sw.serial] || await getDeviceLldpCdp(sw.serial);
               if (info) lldpSnapshots[sw.serial] = info;
             } catch (err) {
-              console.warn(`LLDP del switch ${sw.serial} no disponible`);
+              logger.warn(`LLDP del switch ${sw.serial} no disponible`);
             }
           }
           
@@ -1278,6 +1509,7 @@ app.get('/api/networks/:networkId/section/:sectionKey', async (req, res) => {
           const switchesDetailed = switches.map((sw) => {
             let connectedTo = '-';
             let uplinkPortOnRemote = null;
+            let detectionMethod = 'none';
             
             const lldpData = lldpSnapshots[sw.serial];
             if (lldpData && lldpData.ports) {
@@ -1302,11 +1534,35 @@ app.get('/api/networks/:networkId/section/:sectionKey', async (req, res) => {
                     const portMatch = remotePort.match(/(\d+)/);
                     uplinkPortOnRemote = portMatch ? portMatch[1] : remotePort;
                     connectedTo = `${mxDevice.name || mxDevice.model}/Port ${uplinkPortOnRemote}`.replace(/switch/i, 'SWITCH');
-                    console.info(`${sw.name} conectado a ${connectedTo} (LLDP)`);
+                    detectionMethod = 'lldp';
+                    logger.info(`${sw.name} conectado a ${connectedTo} (LLDP)`);
                     break;
                   }
                 }
               }
+            }
+            
+            // FALLBACK: Inferencia por modelo de MX si LLDP no detectó el puerto
+            if (!uplinkPortOnRemote && mxDevice && mxDevice.model) {
+              const model = mxDevice.model.toUpperCase();
+              let inferredPort = null;
+              
+              if (model.includes('MX64') || model.includes('MX65') || model.includes('MX67')) {
+                inferredPort = '3'; // MX64/65/67: primer puerto LAN es 3
+              } else if (model.includes('MX84') || model.includes('MX100')) {
+                inferredPort = '10'; // MX84/100: primer puerto LAN suele ser 10
+              } else if (model.includes('MX250') || model.includes('MX450')) {
+                inferredPort = '11'; // MX250/450: primer puerto LAN es 11
+              } else if (model.includes('Z3') || model.includes('Z4')) {
+                inferredPort = '5'; // Z3/Z4: puerto LAN principal es 5
+              } else {
+                inferredPort = '10'; // Fallback generico
+              }
+              
+              uplinkPortOnRemote = inferredPort;
+              connectedTo = `${mxDevice.name || mxDevice.model}/Port ${inferredPort}`;
+              detectionMethod = 'model-inference';
+              logger.info(`${sw.name} -> MX Puerto ${inferredPort} (inferencia por modelo ${model})`);
             }
             
             return {
@@ -1314,6 +1570,7 @@ app.get('/api/networks/:networkId/section/:sectionKey', async (req, res) => {
               name: sw.name || sw.serial,
               uplinkPortOnRemote,
               connectedTo,
+              detectionMethod,
               stats: { uplinkPorts: [] } // Simplificado
             };
           });
@@ -1332,11 +1589,11 @@ app.get('/api/networks/:networkId/section/:sectionKey', async (req, res) => {
                 accessPoints: result.accessPoints || []
               });
               applianceEntry.ports = enrichedPorts;
-              console.info(`Puertos del appliance enriquecidos: ${enrichedPorts.filter(p => p.connectedTo).length} conexiones detectadas`);
+              logger.info(`Puertos del appliance enriquecidos: ${enrichedPorts.filter(p => p.connectedTo).length} conexiones detectadas`);
             }
           }
           
-          const rawTopology = await getNetworkTopology_LinkLayer(networkId);
+          const rawTopology = await getNetworkTopologyLinkLayer(networkId);
           const topology = toGraphFromLinkLayer(rawTopology, statusMap);
           
           if (!topology.links?.length && Object.keys(lldpSnapshots).length) {
@@ -1353,13 +1610,13 @@ app.get('/api/networks/:networkId/section/:sectionKey', async (req, res) => {
         return res.status(400).json({ error: `Sección '${sectionKey}' no válida` });
     }
     
-  console.log(`[SECTION-ENDPOINT] Sending response...`);
+  logger.debug(`[SECTION-ENDPOINT] Sending response...`);
   res.json(result);
-  console.info(`Sección '${sectionKey}' cargada en ${Date.now() - startTime}ms`);
+  logger.info(`Sección '${sectionKey}' cargada en ${Date.now() - startTime}ms`);
     
   } catch (error) {
-    console.error(`[SECTION-ENDPOINT] ERROR in ${sectionKey}:`, error.message);
-    console.error(`[SECTION-ENDPOINT] Stack:`, error.stack);
+    logger.error(`[SECTION-ENDPOINT] ERROR in ${sectionKey}:`, { error: error.message });
+    logger.error(`[SECTION-ENDPOINT] Stack:`, { stack: error.stack });
     res.status(500).json({ error: `Error cargando sección ${sectionKey}` });
   }
 });
@@ -1370,13 +1627,13 @@ app.get('/api/networks/:networkId/summary', limiterDatos, handleNetworkSummary);
 
 // Endpoint para datos historicos del appliance (connectivity + bandwidth usage)
 // Usando endpoint organizacional para obtener uplink statuses
-app.get('/api/networks/:networkId/appliance/historical', async (req, res) => {
+app.get('/api/networks/:networkId/appliance/historical', validateNetworkId, validateTimespan, async (req, res) => {
   try {
     const { networkId } = req.params;
     const timespan = parseInt(req.query.timespan) || 3600;
     const resolution = parseInt(req.query.resolution) || 300;
     
-    console.log(`[HISTORICAL] Request for network ${networkId}, timespan: ${timespan}s, resolution: ${resolution}s`);
+    logger.debug(`[HISTORICAL] Request for network ${networkId}, timespan: ${timespan}s, resolution: ${resolution}s`);
     
     const devices = await getNetworkDevices(networkId);
     
@@ -1388,22 +1645,22 @@ app.get('/api/networks/:networkId/appliance/historical', async (req, res) => {
     if (!uplinkDevice) uplinkDevice = devices[0];
     
     if (!uplinkDevice) {
-      console.log(`[HISTORICAL] No uplink device found for network ${networkId}`);
+      logger.debug(`[HISTORICAL] No uplink device found for network ${networkId}`);
       return res.json({ connectivity: [], uplinkUsage: [], configStatus: 'no_device' });
     }
     
-    console.log(`[HISTORICAL] Found uplink device: ${uplinkDevice.serial} (${uplinkDevice.model})`);
+    logger.debug(`[HISTORICAL] Found uplink device: ${uplinkDevice.serial} (${uplinkDevice.model})`);
 
     // Obtener organizationId para usar el endpoint org
     const orgId = await resolveNetworkOrgId(networkId);
     if (!orgId) {
-      console.log(`[HISTORICAL] Could not resolve orgId for network ${networkId}`);
+      logger.debug(`[HISTORICAL] Could not resolve orgId for network ${networkId}`);
       return res.json({ connectivity: [], uplinkUsage: [] });
     }
     
     // Obtener el status de uplinks usando endpoint organizacional
     const orgUplinksRaw = await getOrgApplianceUplinkStatuses(orgId, { 'networkIds[]': networkId });
-    console.log(`[HISTORICAL] Raw uplink data received:`, JSON.stringify(orgUplinksRaw).substring(0, 500));
+    logger.debug(`[HISTORICAL] Raw uplink data received:`, { data: JSON.stringify(orgUplinksRaw).substring(0, 500) });
     
     // Extraer uplinks del dispositivo (pueden venir en diferentes estructuras)
     let uplinks = [];
@@ -1419,7 +1676,7 @@ app.get('/api/networks/:networkId/appliance/historical', async (req, res) => {
       }
     }
     
-    console.log(`[HISTORICAL] Extracted ${uplinks.length} uplinks for device ${uplinkDevice.serial}`);
+    logger.debug(`[HISTORICAL] Extracted ${uplinks.length} uplinks for device ${uplinkDevice.serial}`);
     
     // Buscar la IP publica de algun uplink activo (preferir WAN1, luego WAN2)
     let targetIp = null;
@@ -1432,7 +1689,7 @@ app.get('/api/networks/:networkId/appliance/historical', async (req, res) => {
       if (uplink) {
         targetIp = uplink.publicIp || uplink.publicIP || uplink.ip;
         if (targetIp) {
-          console.log(`[HISTORICAL] Using IP from ${uplink.interface || uplink.name}: ${targetIp}`);
+          logger.debug(`[HISTORICAL] Using IP from ${uplink.interface || uplink.name}: ${targetIp}`);
           break;
         }
       }
@@ -1443,12 +1700,12 @@ app.get('/api/networks/:networkId/appliance/historical', async (req, res) => {
       const anyUplink = uplinks.find(u => u.publicIp || u.publicIP || u.ip);
       if (anyUplink) {
         targetIp = anyUplink.publicIp || anyUplink.publicIP || anyUplink.ip;
-        console.log(`[HISTORICAL] Using IP from any uplink (${anyUplink.interface || anyUplink.name}): ${targetIp}`);
+        logger.debug(`[HISTORICAL] Using IP from any uplink (${anyUplink.interface || anyUplink.name}): ${targetIp}`);
       }
     }
 
     if (!targetIp) {
-      console.log(`[HISTORICAL] No active uplink IP found, will try device performance endpoint`);
+      logger.debug(`[HISTORICAL] No active uplink IP found, will try device performance endpoint`);
     }
 
     // Intentar obtener datos de performance del appliance (incluye perfLatency)
@@ -1457,14 +1714,14 @@ app.get('/api/networks/:networkId/appliance/historical', async (req, res) => {
       getNetworkApplianceUplinksUsageHistory(networkId, { timespan, resolution })
     ]);
     
-    console.log(`[HISTORICAL] Device Performance status: ${devicePerformance.status}`);
-    console.log(`[HISTORICAL] Uplink Usage status: ${uplinkUsage.status}, points: ${uplinkUsage.value?.length || 0}`);
+    logger.debug(`[HISTORICAL] Device Performance status: ${devicePerformance.status}`);
+    logger.debug(`[HISTORICAL] Uplink Usage status: ${uplinkUsage.status}, points: ${uplinkUsage.value?.length || 0}`);
 
     // Procesar datos de performance (puede incluir latency data)
     let connectivityData = [];
     
     // Usar el endpoint correcto de Meraki: /devices/{serial}/lossAndLatencyHistory
-    console.log(`[HISTORICAL] Trying device-level loss/latency endpoint for ${uplinkDevice.serial}`);
+    logger.debug(`[HISTORICAL] Trying device-level loss/latency endpoint for ${uplinkDevice.serial}`);
     try {
       const response = await axios.get(
         `https://api.meraki.com/api/v1/devices/${uplinkDevice.serial}/lossAndLatencyHistory`,
@@ -1479,8 +1736,8 @@ app.get('/api/networks/:networkId/appliance/historical', async (req, res) => {
         }
       );
       
-      console.log(`[HISTORICAL] Device endpoint response status:`, response.status);
-      console.log(`[HISTORICAL] Data points received:`, response.data?.length || 0);
+      logger.debug(`[HISTORICAL] Device endpoint response status:`, { status: response.status });
+      logger.debug(`[HISTORICAL] Data points received:`, { count: response.data?.length || 0 });
       
       if (response.data && Array.isArray(response.data) && response.data.length > 0) {
         // Obtener el estado actual del uplink para interpretar valores null
@@ -1491,7 +1748,7 @@ app.get('/api/networks/:networkId/appliance/historical', async (req, res) => {
         const lastReportedAt = orgUplinksRaw.find(u => u.serial === uplinkDevice.serial)?.lastReportedAt;
         const lastReportTime = lastReportedAt ? new Date(lastReportedAt).getTime() : null;
         
-        console.log(`[HISTORICAL] Current uplink status: ${currentStatus}, lastReported: ${lastReportedAt}`);
+        logger.debug(`[HISTORICAL] Current uplink status: ${currentStatus}, lastReported: ${lastReportedAt}`);
         
         connectivityData = response.data.map(point => {
           const pointTime = new Date(point.startTs || point.ts).getTime();
@@ -1518,19 +1775,19 @@ app.get('/api/networks/:networkId/appliance/historical', async (req, res) => {
           
           return result;
         });
-        console.log(`[HISTORICAL] First point:`, JSON.stringify(connectivityData[0]));
-        console.log(`[HISTORICAL] Last point:`, JSON.stringify(connectivityData[connectivityData.length - 1]));
+        logger.debug(`[HISTORICAL] First point:`, { point: JSON.stringify(connectivityData[0]) });
+        logger.debug(`[HISTORICAL] Last point:`, { point: JSON.stringify(connectivityData[connectivityData.length - 1]) });
       }
     } catch (err) {
-      console.log(`[HISTORICAL] Device endpoint failed:`, err.message);
+      logger.debug(`[HISTORICAL] Device endpoint failed:`, { error: err.message });
       if (err.response) {
-        console.log(`[HISTORICAL] Status:`, err.response.status, 'Data:', err.response.data);
+        logger.debug(`[HISTORICAL] Status:`, { status: err.response.status, data: err.response.data });
       }
     }
     
     // Si no hay datos de conectividad, intentar obtenerlos del endpoint de status de uplinks
     if (connectivityData.length === 0) {
-      console.log(`[HISTORICAL] No connectivity data from loss/latency endpoint, checking uplink statuses`);
+      logger.debug(`[HISTORICAL] No connectivity data from loss/latency endpoint, checking uplink statuses`);
       
       try {
         const isZ3 = (uplinkDevice.model || '').toLowerCase().startsWith('z');
@@ -1543,7 +1800,7 @@ app.get('/api/networks/:networkId/appliance/historical', async (req, res) => {
         );
         
         const deviceStatus = statusResponse.data.find(s => s.serial === uplinkDevice.serial);
-        console.log(`[HISTORICAL] Device uplink status:`, JSON.stringify(deviceStatus));
+        logger.debug(`[HISTORICAL] Device uplink status:`, { deviceStatus: JSON.stringify(deviceStatus) });
         
         // Si tenemos uplinkUsage, crear datos de conectividad basados en el estado real
         if (uplinkUsage.status === 'fulfilled' && uplinkUsage.value && uplinkUsage.value.length > 0 && deviceStatus) {
@@ -1596,11 +1853,11 @@ app.get('/api/networks/:networkId/appliance/historical', async (req, res) => {
             };
           });
           
-          console.log(`[HISTORICAL] Generated ${connectivityData.length} connectivity points from uplink status`);
-          console.log(`[HISTORICAL] Has active uplink: ${hasActiveUplink}`);
+          logger.debug(`[HISTORICAL] Generated ${connectivityData.length} connectivity points from uplink status`);
+          logger.debug(`[HISTORICAL] Has active uplink: ${hasActiveUplink}`);
         }
       } catch (statusErr) {
-        console.log(`[HISTORICAL] Failed to get uplink statuses:`, statusErr.message);
+        logger.debug(`[HISTORICAL] Failed to get uplink statuses:`, { error: statusErr.message });
       }
     }
 
@@ -1609,7 +1866,7 @@ app.get('/api/networks/:networkId/appliance/historical', async (req, res) => {
       uplinkUsage: uplinkUsage.status === 'fulfilled' ? (uplinkUsage.value || []) : []
     });
   } catch (error) {
-    console.error('[HISTORICAL] Error:', error.response?.data || error.message);
+    logger.error('[HISTORICAL] Error:', { data: error.response?.data || error.message });
     res.status(500).json({ error: 'Error obteniendo datos historicos del appliance' });
   }
 });
@@ -1630,7 +1887,7 @@ app.get('/api/networks/:networkId/wireless/ssids', async (req, res) => {
     const data = await getNetworkWirelessSSIDs(networkId);
     res.json(data);
   } catch (error) {
-    console.error('Error /wireless/ssids', error.response?.data || error.message);
+    logger.error('Error /wireless/ssids', { data: error.response?.data || error.message });
     res.status(500).json({ error: 'Error obteniendo SSIDs' });
   }
 });
@@ -1641,7 +1898,7 @@ app.get('/api/networks/:networkId/wireless/ssids/:number', async (req, res) => {
     const data = await getNetworkWirelessSSID(networkId, number);
     res.json(data);
   } catch (error) {
-    console.error('Error /wireless/ssids/:number', error.response?.data || error.message);
+    logger.error('Error /wireless/ssids/:number', { data: error.response?.data || error.message });
     res.status(500).json({ error: 'Error obteniendo SSID' });
   }
 });
@@ -1653,7 +1910,7 @@ app.get('/api/organizations/:orgId/wireless/devices/radsec/certificates/authorit
     const data = await getOrgWirelessDevicesRadsecAuthorities(orgId);
     res.json(data);
   } catch (error) {
-    console.error('Error /org/wireless/radsec/authorities', error.response?.data || error.message);
+    logger.error('Error /org/wireless/radsec/authorities', { data: error.response?.data || error.message });
     res.status(500).json({ error: 'Error obteniendo autoridades RADSEC' });
   }
 });
@@ -1664,7 +1921,7 @@ app.get('/api/organizations/:orgId/appliances/top-utilization', requireAdmin, as
     const data = await getOrgTopAppliancesByUtilization(orgId, req.query || {});
     res.json(data);
   } catch (error) {
-    console.error('Error /organizations/:orgId/appliances/top-utilization', error.response?.data || error.message);
+    logger.error('Error /organizations/:orgId/appliances/top-utilization', { data: error.response?.data || error.message });
     res.status(500).json({ error: 'Error obteniendo ranking de appliances' });
   }
 });
@@ -1675,7 +1932,7 @@ app.get('/api/organizations/:orgId/devices/uplinks-addresses', requireAdmin, asy
     const data = await getOrgDevicesUplinksAddressesByDevice(orgId, req.query || {});
     res.json(data);
   } catch (error) {
-    console.error('Error /organizations/:orgId/devices/uplinks-addresses', error.response?.data || error.message);
+    logger.error('Error /organizations/:orgId/devices/uplinks-addresses', { data: error.response?.data || error.message });
     res.status(500).json({ error: 'Error obteniendo direcciones de uplinks' });
   }
 });
@@ -1686,7 +1943,7 @@ app.get('/api/organizations/:orgId/uplinks/statuses', requireAdmin, async (req, 
     const data = await getOrganizationUplinksStatuses(orgId, req.query || {});
     res.json(data);
   } catch (error) {
-    console.error('Error /organizations/:orgId/uplinks/statuses', error.response?.data || error.message);
+    logger.error('Error /organizations/:orgId/uplinks/statuses', { data: error.response?.data || error.message });
     res.status(500).json({ error: 'Error obteniendo estados de uplinks' });
   }
 });
@@ -1695,7 +1952,7 @@ app.get('/', (req, res) => {
   res.send('API del Portal Meraki funcionando');
 });
 
-// Endpoint de health check optimizado con estadísticas
+// Health check básico (rápido, sin verificaciones externas)
 app.get('/api/health', (req, res) => {
   const cacheStats = {
     networksByOrg: cache.networksByOrg.size,
@@ -1722,12 +1979,97 @@ app.get('/api/health', (req, res) => {
       entries: cacheStats,
       totalEntries: Object.values(cacheStats).reduce((a, b) => a + b, 0)
     },
-    environment: {
-      nodeEnv: process.env.NODE_ENV || 'development',
-      hasApiKey: !!process.env.MERAKI_API_KEY,
-      hasOrgId: !!process.env.MERAKI_ORG_ID
-    }
+    environment: env.getSummary()
   });
+});
+
+// Health check completo con verificación de servicios externos
+app.get('/api/health/full', async (req, res) => {
+  const startTime = Date.now();
+  const checks = {
+    api: { status: 'ok', latency: 0 },
+    meraki: { status: 'unknown', latency: 0, message: '' },
+    predios: { status: 'unknown', count: 0 }
+  };
+
+  // Verificar API local
+  checks.api.latency = Date.now() - startTime;
+
+  // Verificar conexión a Meraki API
+  if (env.meraki.hasApiKey) {
+    const merakiStart = Date.now();
+    try {
+      const orgs = await getOrganizations();
+      checks.meraki.status = 'ok';
+      checks.meraki.latency = Date.now() - merakiStart;
+      checks.meraki.message = `${orgs.length} organizaciones accesibles`;
+    } catch (error) {
+      checks.meraki.status = 'error';
+      checks.meraki.latency = Date.now() - merakiStart;
+      checks.meraki.message = error.response?.status === 401 
+        ? 'API key inválida' 
+        : error.message;
+    }
+  } else {
+    checks.meraki.status = 'not_configured';
+    checks.meraki.message = 'MERAKI_API_KEY no configurada';
+  }
+
+  // Verificar predios
+  try {
+    const stats = getStats();
+    checks.predios.status = 'ok';
+    checks.predios.count = stats.total;
+  } catch {
+    checks.predios.status = 'not_loaded';
+    checks.predios.count = 0;
+  }
+
+  // Determinar status general
+  const overallStatus = 
+    checks.meraki.status === 'error' ? 'degraded' :
+    checks.meraki.status === 'not_configured' ? 'degraded' :
+    'healthy';
+
+  // Obtener estadísticas completas del cache LRU
+  const cacheStats = getAllCacheStats();
+  const totalEntries = Object.values(cacheStats).reduce((acc, stat) => acc + (stat.size || 0), 0);
+
+  res.status(overallStatus === 'healthy' ? 200 : 503).json({
+    status: overallStatus,
+    timestamp: new Date().toISOString(),
+    version: process.env.npm_package_version || '1.0.0',
+    uptime: Math.floor(process.uptime()),
+    checks,
+    cache: {
+      stats: cacheStats,
+      totalEntries
+    },
+    environment: env.getSummary(),
+    totalLatency: Date.now() - startTime
+  });
+});
+
+// Endpoint de readiness para Kubernetes/Docker
+app.get('/api/ready', (req, res) => {
+  // Verificar que el servidor esté listo para recibir tráfico
+  const ready = env.meraki.hasApiKey;
+  
+  if (ready) {
+    res.json({ ready: true, timestamp: new Date().toISOString() });
+  } else {
+    res.status(503).json({ 
+      ready: false, 
+      reason: 'MERAKI_API_KEY not configured',
+      timestamp: new Date().toISOString() 
+    });
+  }
+});
+
+// Endpoint de liveness para Kubernetes/Docker
+app.get('/api/live', (req, res) => {
+  // Simple check que el proceso responde
+  res.json({ live: true, timestamp: new Date().toISOString() });
 });
 
 // Endpoint para limpiar caché (admin only)
@@ -1744,7 +2086,7 @@ app.delete('/api/cache', requireAdmin, limiterEscritura, (req, res) => {
 });
 
 // Endpoints para gestión de predios CSV
-app.get('/api/predios/search', (req, res) => {
+app.get('/api/predios/search', validateSearch, (req, res) => {
   try {
     const filters = {};
     
@@ -1756,7 +2098,7 @@ app.get('/api/predios/search', (req, res) => {
     const results = searchPredios(filters);
     res.json({ predios: results, total: results.length });
   } catch (error) {
-    console.error('Error searching predios:', error.message);
+    logger.error('Error searching predios:', { error: error.message });
     res.status(500).json({ error: 'Error buscando predios' });
   }
 });
@@ -2070,7 +2412,7 @@ app.get('/api/predios/stats', requireAdmin, (req, res) => {
     const stats = getStats();
     res.json(stats);
   } catch (error) {
-    console.error('Error getting predios stats:', error.message);
+    logger.error('Error getting predios stats:', { error: error.message });
     res.status(500).json({ error: 'Error obteniendo estadísticas' });
   }
 });
@@ -2085,7 +2427,7 @@ app.post('/api/predios/refresh', requireAdmin, limiterEscritura, (req, res) => {
       timestamp: new Date().toISOString()
     });
   } catch (error) {
-    console.error('Error refreshing predios cache:', error.message);
+    logger.error('Error refreshing predios cache:', { error: error.message });
     res.status(500).json({ error: 'Error refrescando cache' });
   }
 });
@@ -2095,7 +2437,7 @@ app.post('/api/predios/sync', requireAdmin, limiterEscritura, async (req, res) =
     const summary = await syncPrediosCsv({ force: req.body?.force === true });
     res.json(summary);
   } catch (error) {
-    console.error('Error syncing predios:', error.message);
+    logger.error('Error syncing predios:', { error: error.message });
     res.status(500).json({ error: 'Error sincronizando predios' });
   }
 });
@@ -2288,7 +2630,7 @@ app.get('/api/predios/:code', (req, res) => {
     
     res.json(predio);
   } catch (error) {
-    console.error('Error finding predio:', error.message);
+    logger.error('Error finding predio:', { error: error.message });
     res.status(500).json({ error: 'Error buscando predio' });
   }
 });
@@ -2310,7 +2652,7 @@ process.on('unhandledRejection', (reason, promise) => {
 
 app.listen(puerto, host, () => {
   logger.info(`Portal Meraki iniciado en http://${host}:${puerto}`);
-  logger.info(`Entorno: ${process.env.NODE_ENV || 'development'}`);
+  logger.info(`Entorno: ${env.NODE_ENV}`);
   logger.info(`Acceso remoto habilitado en: http://${host === '0.0.0.0' ? 'tu-ip-servidor' : host}:${puerto}`);
   logger.info(`Sistema CSV optimizado para 20,000+ predios`);
   
@@ -2325,7 +2667,7 @@ app.listen(puerto, host, () => {
   startPrediosAutoRefresh();
 
   // Warm-up cache inicial (después de 10 segundos para no bloquear el inicio)
-  if (process.env.ENABLE_WARM_CACHE !== 'false') {
+  if (env.cache.enableWarmCache) {
     setTimeout(() => {
   logger.info(`Iniciando warm-up cache de predios frecuentes...`);
       warmUpFrequentPredios(cache).catch(err => {

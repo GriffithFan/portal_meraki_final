@@ -2,6 +2,7 @@ import { useState, useEffect, useRef } from 'react';
 import Login from './pages/Login';
 import Dashboard from './pages/Dashboard';
 import AdminPanel from './pages/AdminPanel';
+import ErrorBoundary from './components/ErrorBoundary';
 
 // Root component - handles authentication state and routing
 function App() {
@@ -96,7 +97,11 @@ function App() {
     return <AdminPanel adminKey={adminKey} onLogout={handleAdminLogout} />;
   }
   if (techUser) {
-    return <Dashboard user={techUser} token={token} onLogout={handleLogout} />;
+    return (
+      <ErrorBoundary>
+        <Dashboard user={techUser} token={token} onLogout={handleLogout} />
+      </ErrorBoundary>
+    );
   }
 
   return <Login onLogin={handleLogin} onAdminLogin={handleAdminLogin} />;

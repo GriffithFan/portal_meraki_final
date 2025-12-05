@@ -1,18 +1,63 @@
 const axios = require('axios');
+const PQueue = require('p-queue').default;
+const { logger } = require('./config/logger');
 
 const MERAKI_API_KEY = process.env.MERAKI_API_KEY || '';
 const BASE_URL = process.env.MERAKI_BASE_URL || 'https://api.meraki.com/api/v1';
 
+// ========== RATE LIMITING GLOBAL ==========
+// Meraki API límite: 5 req/sec por organización (burst hasta 10, luego throttle)
+// Configuramos queue conservador: 4 req/sec = 250ms entre requests
+const apiQueue = new PQueue({
+  interval: 1000,      // 1 segundo
+  intervalCap: 4,      // Máximo 4 requests por segundo (margen de seguridad)
+  concurrency: 4,      // Máximo 4 requests paralelos
+  timeout: 30000,      // Timeout global de 30s por request
+  throwOnTimeout: false
+});
+
+logger.info('[merakiApi] Rate limiter inicializado: 4 req/sec, concurrencia 4');
+
 // Centralized Meraki API client with retry logic and authentication
 const client = axios.create({
   baseURL: BASE_URL,
-  timeout: 15000,
+  timeout: 20000,  // Aumentado de 15s a 20s para predios grandes
   headers: {
     'X-Cisco-Meraki-API-Key': MERAKI_API_KEY,
     'Content-Type': 'application/json',
     'Accept': 'application/json'
   }
 });
+
+// ========== RETRY LOGIC MEJORADO ==========
+// Reintentos exponenciales para 429 (rate limit) y errores temporales
+async function retryWithBackoff(fn, maxRetries = 4, initialDelay = 800) {
+  let lastError;
+  for (let attempt = 0; attempt < maxRetries; attempt++) {
+    try {
+      return await fn();
+    } catch (error) {
+      lastError = error;
+      const status = error.response?.status;
+      
+      // Solo reintentar en errores recuperables
+      if (status === 429 || status === 503 || status === 502 || !status) {
+        const delay = initialDelay * Math.pow(2, attempt);
+        logger.warn(`[merakiApi] Error ${status || 'timeout'} (intento ${attempt + 1}/${maxRetries}). Reintentando en ${delay}ms`);
+        await new Promise(resolve => setTimeout(resolve, delay));
+      } else {
+        // Errores no recuperables (400, 401, 403, 404) - no reintentar
+        throw error;
+      }
+    }
+  }
+  throw lastError;
+}
+
+// Wrapper para ejecutar requests a través de la queue con reintentos
+async function queuedRequest(requestFn) {
+  return apiQueue.add(() => retryWithBackoff(requestFn));
+}
 
 // Extract pagination cursor from RFC 5988 Link header format
 // The Meraki API returns cursors in various header formats depending on endpoint
@@ -82,7 +127,7 @@ async function fetchAllPages(path, params = {}, { perPage = 1000, maxPages = 100
 if (!MERAKI_API_KEY) {
   // Aviso temprano en logs para evitar confusión cuando falte la API key
   // No lanzamos excepción aquí para que el servidor levante, pero las llamadas a Meraki fallarán con 401/403
-  console.warn('[merakiApi] MERAKI_API_KEY no está configurada en .env. Configúrala para que las llamadas a la API de Meraki funcionen.');
+  logger.warn('[merakiApi] MERAKI_API_KEY no está configurada en .env. Configúrala para que las llamadas a la API de Meraki funcionen.');
 }
 
 async function getOrganizations() {
@@ -143,7 +188,7 @@ async function getApplianceStatuses(networkId) {
     return data;
   } catch (e) {
     if (e.response && e.response.status === 404) {
-      console.warn(`[merakiApi] Fallback: /appliance/uplinks/statuses no encontrado para ${networkId}, intentando /appliance/uplink/statuses`);
+      logger.warn(`[merakiApi] Fallback: /appliance/uplinks/statuses no encontrado para ${networkId}, intentando /appliance/uplink/statuses`);
       const { data } = await client.get(`/networks/${networkId}/appliance/uplink/statuses`);
       return data;
     }
@@ -258,7 +303,7 @@ async function getDeviceAppliancePerformance(serial, params = {}) {
     const { data } = await client.get(`/devices/${serial}/appliance/performance`, { params });
     return data;
   } catch (error) {
-    console.error(`Error fetching device appliance performance for ${serial}:`, error.message);
+    logger.error(`Error fetching device appliance performance for ${serial}:`, { error: error.message });
     return null;
   }
 }
@@ -331,7 +376,7 @@ async function getDeviceAppliancePortsStatuses(serial) {
     return data;
   } catch (error) {
     if (error?.response?.status === 404) {
-      console.warn(`[merakiApi] /devices/${serial}/appliance/ports/statuses no disponible, probando endpoint alternativo`);
+      logger.warn(`[merakiApi] /devices/${serial}/appliance/ports/statuses no disponible, probando endpoint alternativo`);
       const { data } = await client.get(`/devices/${serial}/appliance/ports/status`);
       return data;
     }
@@ -345,7 +390,7 @@ async function getOrgApplianceUplinksLossAndLatency(organizationId, params = {})
     return data;
   } catch (error) {
     if (error?.response?.status === 404) {
-      console.warn('[merakiApi] Endpoint lossAndLatency no disponible, omitiendo timeseries de conectividad');
+      logger.warn('[merakiApi] Endpoint lossAndLatency no disponible, omitiendo timeseries de conectividad');
       return [];
     }
     throw error;
@@ -358,7 +403,7 @@ async function getOrgApplianceUplinksUsageByDevice(organizationId, params = {}) 
     return data;
   } catch (error) {
     if (error?.response?.status === 404) {
-      console.warn('[merakiApi] Endpoint usage/byDevice no disponible, omitiendo métricas de uso por uplink');
+      logger.warn('[merakiApi] Endpoint usage/byDevice no disponible, omitiendo métricas de uso por uplink');
       return [];
     }
     throw error;
@@ -381,7 +426,7 @@ async function getNetworkSwitchAccessControlLists(networkId) {
     const { data } = await client.get(`/networks/${networkId}/switch/accessControlLists`);
     return data;
   } catch (error) {
-    console.error(`Error fetching switch ACLs for network ${networkId}:`, error.message);
+    logger.error(`Error fetching switch ACLs for network ${networkId}:`, { error: error.message });
     return { rules: [] };
   }
 }
@@ -393,7 +438,7 @@ async function getOrgSwitchPortsBySwitch(organizationId) {
     });
     return data;
   } catch (error) {
-    console.error(`Error fetching switch ports by switch:`, error.message);
+    logger.error(`Error fetching switch ports by switch:`, { error: error.message });
     return [];
   }
 }
@@ -403,7 +448,7 @@ async function getNetworkSwitchStackRoutingInterfaces(networkId, switchStackId) 
     const { data } = await client.get(`/networks/${networkId}/switch/stacks/${switchStackId}/routing/interfaces`);
     return data;
   } catch (error) {
-    console.error(`Error fetching switch stack routing interfaces:`, error.message);
+    logger.error(`Error fetching switch stack routing interfaces:`, { error: error.message });
     return [];
   }
 }
@@ -414,17 +459,22 @@ async function getNetworkCellularGatewayConnectivityMonitoringDestinations(netwo
     const { data } = await client.get(`/networks/${networkId}/cellularGateway/connectivityMonitoringDestinations`);
     return data;
   } catch (error) {
-    console.error(`Error fetching cellular gateway connectivity destinations for network ${networkId}:`, error.message);
+    logger.error(`Error fetching cellular gateway connectivity destinations for network ${networkId}:`, { error: error.message });
     return { destinations: [] };
   }
 }
 
 async function getDeviceWirelessConnectionStats(serial, params = {}) {
   try {
-    const { data } = await client.get(`/devices/${serial}/wireless/connectionStats`, { params });
-    return data;
+    return await queuedRequest(async () => {
+      const { data } = await client.get(`/devices/${serial}/wireless/connectionStats`, { params });
+      return data;
+    });
   } catch (error) {
-    console.error(`Error fetching wireless connection stats for device ${serial}:`, error.message);
+    const status = error.response?.status;
+    if (status !== 429) {
+      logger.warn(`Error fetching wireless connection stats for device ${serial}: ${error.message}`);
+    }
     return null;
   }
 }
@@ -435,7 +485,7 @@ async function getNetworkWirelessConnectionStats(networkId, params = {}) {
     const { data } = await client.get(`/networks/${networkId}/wireless/connectionStats`, { params });
     return data;
   } catch (error) {
-    console.error(`Error fetching network wireless connection stats for ${networkId}:`, error.message);
+    logger.error(`Error fetching network wireless connection stats for ${networkId}:`, { error: error.message });
     return null;
   }
 }
@@ -445,7 +495,7 @@ async function getNetworkWirelessLatencyStats(networkId, params = {}) {
     const { data } = await client.get(`/networks/${networkId}/wireless/latencyStats`, { params });
     return data;
   } catch (error) {
-    console.error(`Error fetching wireless latency stats:`, error.message);
+    logger.error(`Error fetching wireless latency stats:`, { error: error.message });
     return null;
   }
 }
@@ -455,17 +505,22 @@ async function getDeviceWirelessLatencyStats(serial, params = {}) {
     const { data } = await client.get(`/devices/${serial}/wireless/latencyStats`, { params });
     return data;
   } catch (error) {
-    console.error(`Error fetching device wireless latency stats:`, error.message);
+    logger.error(`Error fetching device wireless latency stats:`, { error: error.message });
     return null;
   }
 }
 
 async function getNetworkWirelessFailedConnections(networkId, params = {}) {
   try {
-    const { data } = await client.get(`/networks/${networkId}/wireless/failedConnections`, { params });
-    return data;
+    return await queuedRequest(async () => {
+      const { data } = await client.get(`/networks/${networkId}/wireless/failedConnections`, { params });
+      return data;
+    });
   } catch (error) {
-    console.error(`Error fetching wireless failed connections:`, error.message);
+    const status = error.response?.status;
+    if (status !== 429) {
+      logger.warn(`Error fetching wireless failed connections (${networkId}): ${error.message}`);
+    }
     return [];
   }
 }
@@ -480,7 +535,7 @@ async function getDeviceLossAndLatencyHistory(serial, params = {}) {
     const { data } = await client.get(`/devices/${serial}/lossAndLatencyHistory`, { params });
     return data;
   } catch (error) {
-    console.error(`Error fetching loss and latency history for device ${serial}:`, error.message);
+    logger.error(`Error fetching loss and latency history for device ${serial}:`, { error: error.message });
     return null;
   }
 }
@@ -491,7 +546,7 @@ async function getOrgDevicesUplinksLossAndLatency(organizationId, params = {}) {
     const { data } = await client.get(`/organizations/${organizationId}/devices/uplinksLossAndLatency`, { params });
     return data;
   } catch (error) {
-    console.error(`Error fetching org uplinks loss and latency for org ${organizationId}:`, error.message);
+    logger.error(`Error fetching org uplinks loss and latency for org ${organizationId}:`, { error: error.message });
     return [];
   }
 }
@@ -502,7 +557,7 @@ async function getOrgWirelessDevicesPacketLossByClient(organizationId, params = 
     const { data } = await client.get(`/organizations/${organizationId}/wireless/devices/packetLoss/byClient`, { params });
     return data;
   } catch (error) {
-    console.error(`Error fetching wireless packet loss by client:`, error.message);
+    logger.error(`Error fetching wireless packet loss by client:`, { error: error.message });
     return [];
   }
 }
@@ -513,7 +568,7 @@ async function getOrgWirelessDevicesPacketLossByDevice(organizationId, params = 
     const { data } = await client.get(`/organizations/${organizationId}/wireless/devices/packetLoss/byDevice`, { params });
     return data;
   } catch (error) {
-    console.error(`Error fetching wireless packet loss by device:`, error.message);
+    logger.error(`Error fetching wireless packet loss by device:`, { error: error.message });
     return [];
   }
 }
@@ -523,7 +578,7 @@ async function getNetworkApplianceConnectivityMonitoringDests(networkId) {
     const { data } = await client.get(`/networks/${networkId}/appliance/connectivityMonitoringDestinations`);
     return data;
   } catch (error) {
-    console.error(`Error fetching appliance connectivity monitoring destinations:`, error.message);
+    logger.error(`Error fetching appliance connectivity monitoring destinations:`, { error: error.message });
     return null;
   }
 }
@@ -533,7 +588,7 @@ async function getNetworkAppliancePortsConfig(networkId) {
     const { data } = await client.get(`/networks/${networkId}/appliance/ports`);
     return data;
   } catch (error) {
-    console.error(`Error fetching appliance ports config:`, error.message);
+    logger.error(`Error fetching appliance ports config:`, { error: error.message });
     return [];
   }
 }
@@ -543,7 +598,7 @@ async function getOrgApplianceUplinkStatuses(organizationId, params = {}) {
     // Parámetros: networkIds[], serials[], iccids[]
     return fetchAllPages(`/organizations/${organizationId}/appliance/uplink/statuses`, params, { perPage: 1000 });
   } catch (error) {
-    console.error(`Error fetching org appliance uplink statuses:`, error.message);
+    logger.error(`Error fetching org appliance uplink statuses:`, { error: error.message });
     return [];
   }
 }
@@ -553,7 +608,7 @@ async function getNetworkApplianceVlans(networkId) {
     const { data } = await client.get(`/networks/${networkId}/appliance/vlans`);
     return data;
   } catch (error) {
-    console.error(`Error fetching appliance VLANs:`, error.message);
+    logger.error(`Error fetching appliance VLANs:`, { error: error.message });
     return [];
   }
 }
@@ -563,7 +618,7 @@ async function getNetworkApplianceVlan(networkId, vlanId) {
     const { data } = await client.get(`/networks/${networkId}/appliance/vlans/${vlanId}`);
     return data;
   } catch (error) {
-    console.error(`Error fetching appliance VLAN ${vlanId}:`, error.message);
+    logger.error(`Error fetching appliance VLAN ${vlanId}:`, { error: error.message });
     return null;
   }
 }
@@ -573,7 +628,7 @@ async function getNetworkApplianceSettings(networkId) {
     const { data } = await client.get(`/networks/${networkId}/appliance/settings`);
     return data;
   } catch (error) {
-    console.error(`Error fetching appliance settings:`, error.message);
+    logger.error(`Error fetching appliance settings:`, { error: error.message });
     return null;
   }
 }
@@ -583,7 +638,7 @@ async function getOrgApplianceSdwanInternetPolicies(organizationId) {
     const { data } = await client.get(`/organizations/${organizationId}/appliance/sdwan/internetPolicies`);
     return data;
   } catch (error) {
-    console.error(`Error fetching SDWAN internet policies:`, error.message);
+    logger.error(`Error fetching SDWAN internet policies:`, { error: error.message });
     return [];
   }
 }
@@ -592,7 +647,7 @@ async function getOrgUplinksStatuses(organizationId, params = {}) {
   try {
     return fetchAllPages(`/organizations/${organizationId}/uplinks/statuses`, params, { perPage: 1000 });
   } catch (error) {
-    console.error(`Error fetching org uplinks statuses:`, error.message);
+    logger.error(`Error fetching org uplinks statuses:`, { error: error.message });
     return [];
   }
 }
@@ -602,7 +657,7 @@ async function getDeviceApplianceUplinksSettings(serial) {
     const { data } = await client.get(`/devices/${serial}/appliance/uplinks/settings`);
     return data;
   } catch (error) {
-    console.error(`Error fetching appliance uplinks settings:`, error.message);
+    logger.error(`Error fetching appliance uplinks settings:`, { error: error.message });
     return null;
   }
 }
@@ -612,7 +667,7 @@ async function getNetworkApplianceTrafficShapingUplinkSelection(networkId) {
     const { data } = await client.get(`/networks/${networkId}/appliance/trafficShaping/uplinkSelection`);
     return data;
   } catch (error) {
-    console.error(`Error fetching traffic shaping uplink selection:`, error.message);
+    logger.error(`Error fetching traffic shaping uplink selection:`, { error: error.message });
     return null;
   }
 }
@@ -623,7 +678,7 @@ async function getOrgApplianceUplinksUsageByNetwork(organizationId, params = {})
     const { data } = await client.get(`/organizations/${organizationId}/appliance/uplinks/usage/byNetwork`, { params });
     return data;
   } catch (error) {
-    console.error(`Error fetching appliance uplinks usage by network:`, error.message);
+    logger.error(`Error fetching appliance uplinks usage by network:`, { error: error.message });
     return [];
   }
 }
@@ -634,7 +689,7 @@ async function getNetworkApplianceUplinksUsageHistory(networkId, params = {}) {
     const { data } = await client.get(`/networks/${networkId}/appliance/uplinks/usageHistory`, { params });
     return data;
   } catch (error) {
-    console.error(`Error fetching network uplinks usage history:`, error.message);
+    logger.error(`Error fetching network uplinks usage history:`, { error: error.message });
     return [];
   }
 }
@@ -644,18 +699,26 @@ async function getOrgApplianceUplinksStatusesOverview(organizationId) {
     const { data } = await client.get(`/organizations/${organizationId}/appliance/uplinks/statuses/overview`);
     return data;
   } catch (error) {
-    console.error(`Error fetching appliance uplinks statuses overview:`, error.message);
+    logger.error(`Error fetching appliance uplinks statuses overview:`, { error: error.message });
     return null;
   }
 }
 
 // Nuevo endpoint: Estado de puertos ethernet de APs wireless
+// CRÍTICO: Este endpoint falla con 429 en predios grandes, implementar reintentos agresivos
 async function getOrgWirelessDevicesEthernetStatuses(organizationId, params = {}) {
   try {
-    const { data } = await client.get(`/organizations/${organizationId}/wireless/devices/ethernet/statuses`, { params });
-    return data;
+    return await queuedRequest(async () => {
+      const { data } = await client.get(`/organizations/${organizationId}/wireless/devices/ethernet/statuses`, { params });
+      return data;
+    });
   } catch (error) {
-    console.error(`Error fetching wireless devices ethernet statuses:`, error.message);
+    const status = error.response?.status;
+    if (status === 429) {
+      logger.warn(`[merakiApi] Rate limit en ethernet statuses después de ${4} reintentos. Devolviendo array vacío (fallback a LLDP activo).`);
+    } else if (status !== 404) {
+      logger.warn(`Error fetching wireless devices ethernet statuses: ${error.message}`);
+    }
     return [];
   }
 }
@@ -667,9 +730,21 @@ async function getOrgDevicesAvailabilitiesChangeHistory(organizationId, params =
     const { data } = await client.get(`/organizations/${organizationId}/devices/availabilities/changeHistory`, { params });
     return data;
   } catch (error) {
-    console.error(`Error fetching devices availabilities change history:`, error.message);
+    logger.error(`Error fetching devices availabilities change history:`, { error: error.message });
     return [];
   }
+}
+
+// Wireless Controllers by Device para una organización
+async function getOrgWirelessControllersByDevice(organizationId) {
+  const { data } = await client.get(`/organizations/${organizationId}/wireless/devices/wirelessControllers/byDevice`);
+  return data;
+}
+
+// Wireless Controller Connections para una organización
+async function getOrgWirelessControllerConnections(organizationId) {
+  const { data } = await client.get(`/organizations/${organizationId}/wirelessController/connections`);
+  return data;
 }
 
 module.exports = {
@@ -749,5 +824,8 @@ module.exports = {
   // Wireless ethernet statuses
   getOrgWirelessDevicesEthernetStatuses,
   // Device availabilities
-  getOrgDevicesAvailabilitiesChangeHistory
+  getOrgDevicesAvailabilitiesChangeHistory,
+  // Wireless controllers
+  getOrgWirelessControllersByDevice,
+  getOrgWirelessControllerConnections
 };

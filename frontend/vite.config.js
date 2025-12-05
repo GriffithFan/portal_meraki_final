@@ -9,36 +9,31 @@ export default defineConfig({
       registerType: 'autoUpdate',
       injectRegister: 'auto',
       workbox: {
-        globPatterns: ['**/*.{js,css,html,ico,png,svg,json}'],
+        // Solo cachear assets estáticos, NO el HTML ni APIs
+        globPatterns: ['**/*.{js,css,ico,png,svg,woff,woff2}'],
+        // Excluir archivos que no deben cachearse
+        globIgnores: ['**/index.html', '**/manifest.json', '**/sw.js'],
         cleanupOutdatedCaches: true,
-        skipWaiting: true,
-        clientsClaim: true,
+        // CAMBIO CRÍTICO: No forzar activación inmediata para evitar inconsistencias
+        skipWaiting: false,
+        clientsClaim: false,
+        // NO cachear APIs - siempre ir a la red para datos frescos
+        // Eliminado runtimeCaching para APIs del backend
         runtimeCaching: [
+          // Solo cachear API externa de Meraki con timeout muy corto
           {
             urlPattern: /^https:\/\/api\.meraki\.com\/.*/i,
-            handler: 'NetworkFirst',
+            handler: 'NetworkOnly', // Cambiado de NetworkFirst a NetworkOnly
             options: {
               cacheName: 'meraki-api-cache',
-              expiration: {
-                maxEntries: 50,
-                maxAgeSeconds: 5 * 60
-              },
-              networkTimeoutSeconds: 10
-            }
-          },
-          {
-            urlPattern: /^https:\/\/portalmeraki\.info\/api\/.*/i,
-            handler: 'NetworkFirst',
-            options: {
-              cacheName: 'backend-api-cache',
-              expiration: {
-                maxEntries: 100,
-                maxAgeSeconds: 5 * 60
-              },
-              networkTimeoutSeconds: 10
+              networkTimeoutSeconds: 30
             }
           }
-        ]
+          // ELIMINADO: Cache del backend - las APIs siempre deben ir a la red
+        ],
+        // Navegación siempre va a la red primero
+        navigateFallback: null,
+        navigateFallbackDenylist: [/^\/api\//]
       },
       includeAssets: ['icon-192.svg', 'icon-512.svg'],
       manifest: {

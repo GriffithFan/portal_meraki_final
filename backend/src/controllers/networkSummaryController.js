@@ -1,4 +1,5 @@
 const { cache, getFromCache, setInCache } = require('../cache/cacheStore');
+const { logger } = require('../config/logger');
 const { resolveNetworkOrgId } = require('../utils/networkResolver');
 const { DEFAULT_WIRELESS_TIMESPAN, composeWirelessMetrics } = require('../utils/wirelessMetrics');
 const { toGraphFromLinkLayer, buildTopologyFromLldp } = require('../transformers');
@@ -256,6 +257,8 @@ async function getNetworkSummary(req, res) {
     const lldpLabel = lldpInfo ? buildLabel(lldpInfo.systemName, lldpInfo.portId || lldpInfo.port, lldpInfo.portDescription) : null;
     const cdpLabel = cdpInfo ? buildLabel(cdpInfo.deviceId || cdpInfo.deviceIdV2, cdpInfo.portId || cdpInfo.port, cdpInfo.portDescription) : null;
 
+    const resolvedPortId = lldpInfo?.portId || lldpInfo?.port || cdpInfo?.portId || cdpInfo?.port || record.portId || record.port || null;
+
     if (lldpLabel) {
       device.connectedTo = lldpLabel;
       updated = true;
@@ -264,20 +267,118 @@ async function getNetworkSummary(req, res) {
       updated = true;
     }
 
+    if (resolvedPortId && !device.connectedPort) {
+      device.connectedPort = resolvedPortId;
+    }
+
+    // Solo asignar wiredSpeed si podemos inferirlo de la descripción LLDP/CDP
+    // No asignar valor por defecto - dejar null para mostrar '-' hasta obtener datos reales
     if (!device.wiredSpeed) {
       const descriptor = [cdpInfo?.platform, lldpInfo?.systemDescription, lldpInfo?.portDescription].filter(Boolean).join(' ');
       if (/10g|10000/i.test(descriptor)) {
         device.wiredSpeed = '10 Gbps';
       } else if (/2500|2\.5g/i.test(descriptor)) {
         device.wiredSpeed = '2.5 Gbps';
-      } else if (/gigabit|1000/i.test(descriptor)) {
-        device.wiredSpeed = '1000 Mbps';
-      } else if (/100m|fast ethernet/i.test(descriptor)) {
-        device.wiredSpeed = '100 Mbps';
       }
+      // NO inferir velocidades comunes por defecto - dejamos null para mostrar '-'
     }
 
     return updated;
+  };
+
+  const buildAccessPointsPayload = ({ accessPoints = [], wirelessInsights = null } = {}) => {
+    if (!Array.isArray(accessPoints) || !accessPoints.length) return [];
+
+    const serialVariantsOf = (serial) => {
+      const normalized = (serial || '').toString().trim().toUpperCase();
+      if (!normalized) return [];
+      const variants = [normalized];
+      const compact = normalized.replace(/-/g, '');
+      if (compact && compact !== normalized) variants.push(compact);
+      return variants;
+    };
+
+    const wirelessMap = new Map();
+    if (Array.isArray(wirelessInsights?.devices)) {
+      wirelessInsights.devices.forEach((device) => {
+        serialVariantsOf(device?.serial).forEach((key) => {
+          if (key && !wirelessMap.has(key)) {
+            wirelessMap.set(key, device);
+          }
+        });
+      });
+    }
+
+    const extractPortFromLabel = (label) => {
+      if (!label) return null;
+      const match = label.toString().match(/(?:port|puerto)\s*(\d+)/i);
+      if (match) return match[1];
+      const trailingNumber = label.toString().match(/(\d+)(?:\/?\d+)*$/);
+      return trailingNumber ? trailingNumber[1] : null;
+    };
+
+    return accessPoints.map((ap) => {
+      const serialKeys = serialVariantsOf(ap?.serial);
+      const wirelessDetail = serialKeys.map((key) => wirelessMap.get(key)).find(Boolean) || null;
+      const signalSummary = wirelessDetail?.signalSummary || null;
+      const connectedTo = ap?.connectedTo || '-';
+      const connectedPort = (ap?.connectedPort || extractPortFromLabel(connectedTo) || '-').toString();
+      const wiredSpeed = ap?.wiredSpeed || null;
+
+      const tooltipInfo = {
+        type: 'access-point',
+        name: ap?.name || ap?.serial,
+        model: ap?.model,
+        serial: ap?.serial,
+        mac: ap?.mac,
+        firmware: ap?.firmware,
+        lanIp: ap?.lanIp,
+        status: ap?.status,
+        signalQuality: signalSummary?.latest ?? signalSummary?.average ?? null,
+        clients: Array.isArray(wirelessDetail?.clients) ? wirelessDetail.clients.length : null,
+        microDrops: signalSummary?.microDrops ?? wirelessDetail?.microDrops ?? 0,
+        microDurationSeconds: signalSummary?.microDurationSeconds ?? wirelessDetail?.microDurationSeconds ?? 0,
+        connectedTo,
+        wiredPort: connectedPort,
+        wiredSpeed,
+        power: ap?.power ?? null,
+      };
+
+      const wirelessPayload = wirelessDetail ? {
+        signalSummary,
+        history: Array.isArray(wirelessDetail.history) ? wirelessDetail.history : [],
+        microDrops: wirelessDetail.microDrops ?? signalSummary?.microDrops ?? 0,
+        microDurationSeconds: wirelessDetail.microDurationSeconds ?? signalSummary?.microDurationSeconds ?? 0,
+        deviceAggregate: wirelessDetail.deviceAggregate || null,
+        failedConnections: wirelessDetail.failedConnections || null,
+        failureHistory: wirelessDetail.failureHistory || null,
+        clients: wirelessDetail.clients || null,
+      } : {
+        signalSummary: null,
+        history: [],
+        microDrops: 0,
+        microDurationSeconds: 0,
+        deviceAggregate: null,
+        failedConnections: null,
+        failureHistory: null,
+        clients: null,
+      };
+
+      return {
+        serial: ap?.serial,
+        name: ap?.name,
+        model: ap?.model,
+        status: ap?.status,
+        mac: ap?.mac,
+        lanIp: ap?.lanIp,
+        connectedTo,
+        connectedPort,
+        wiredSpeed,
+        tooltipInfo,
+        wireless: wirelessPayload,
+        lastReportedAt: ap?.lastReportedAt || wirelessDetail?.lastReportedAt || null,
+      };
+    });
   };
 
   const resolveUplinkAddressKey = (value) => {
@@ -289,6 +390,18 @@ async function getNetworkSummary(req, res) {
     if (normalized.includes('cell') || normalized.includes('lte') || normalized.includes('modem')) return 'cellular';
     if (normalized.includes('wan3')) return 'wan3';
     return normalized;
+  };
+
+  // Inferir velocidad Ethernet basada en el modelo del AP
+  const inferSpeedFromModel = (model) => {
+    if (!model) return null;
+    const normalized = model.toString().toUpperCase();
+    // MR access points con puerto multigigabit
+    if (/MR(4[4-9]|5[0-9]|7[0-9]|8[0-9])/i.test(normalized)) return '2.5 Gbps';
+    // MR access points con puerto gigabit estándar
+    if (/MR(2[0-9]|3[0-9]|4[0-3])/i.test(normalized)) return '1000 Mbps';
+    // Fallback para otros modelos
+    return '1000 Mbps';
   };
 
   const flattenAppliancePortStatuses = (raw) => {
@@ -843,7 +956,7 @@ async function getNetworkSummary(req, res) {
       const portNumber = portLayout[interfaceKey];
 
       if (portNumber !== undefined) {
-  console.debug(`Mapeando ${interfaceKey} al puerto f├¡sico ${portNumber} para ${applianceSerial}`);
+  logger.debug(`Mapeando ${interfaceKey} al puerto f├¡sico ${portNumber} para ${applianceSerial}`);
         return {
           ...uplink,
           portNumber,
@@ -856,7 +969,7 @@ async function getNetworkSummary(req, res) {
 
     // Logging para debug
     const mappedCount = enrichedUplinks.filter((u) => u.portNumber !== undefined).length;
-  console.debug(`${mappedCount}/${uplinks.length} uplinks mapeados para ${applianceSerial} (${normalizedModel})`);
+  logger.debug(`${mappedCount}/${uplinks.length} uplinks mapeados para ${applianceSerial} (${normalizedModel})`);
 
     return enrichedUplinks;
   };
@@ -868,13 +981,13 @@ async function getNetworkSummary(req, res) {
     const serialUpper = (applianceSerial || '').toString().toUpperCase();
     if (!serialUpper) return ports;
 
-  console.debug(`Procesando puertos del appliance ${applianceSerial}`);
+  logger.debug(`Procesando puertos del appliance ${applianceSerial}`);
 
     // Map para almacenar conectividad detectada: portNumber -> { switchSerial, switchPort, switchName }
     const portConnectivity = new Map();
 
     // PASO 1: Usar datos reales de uplinkPortOnRemote de los switches
-    console.debug(`switchesDetailed recibidos: ${switchesDetailed.length} elementos`);
+    logger.debug(`switchesDetailed recibidos: ${switchesDetailed.length} elementos`);
     
     switchesDetailed.forEach((switchInfo) => {
       if (!switchInfo.uplinkPortOnRemote) return;
@@ -900,7 +1013,7 @@ async function getNetworkSummary(req, res) {
           _sourceMethod: 'lldp-real-data',
         });
         
-  console.debug(`Puerto ${appliancePort} del appliance al switch ${switchName}, puerto ${switchPortNumber} (LLDP)`);
+  logger.debug(`Puerto ${appliancePort} del appliance al switch ${switchName}, puerto ${switchPortNumber} (LLDP)`);
       }
     });
 
@@ -908,7 +1021,7 @@ async function getNetworkSummary(req, res) {
     // Los APs ya tienen procesado su LLDP en la secci├│n access_points
     const isZ3 = applianceModel && applianceModel.toString().trim().toUpperCase().startsWith('Z3');
     if (isZ3 && Array.isArray(accessPoints) && accessPoints.length > 0) {
-      console.debug(`Detectando APs conectados al Z3, total APs: ${accessPoints.length}`);
+      logger.debug(`Detectando APs conectados al Z3, total APs: ${accessPoints.length}`);
       
       // REGLA: En redes GAP (Z3 + APs sin switch), el AP SIEMPRE va en puerto 5 (PoE)
       // Si hay exactamente 1 AP y no hay switches, es GAP
@@ -920,7 +1033,7 @@ async function getNetworkSummary(req, res) {
         const connectedTo = ap.connectedTo || '';
         let connectedPort = ap.connectedPort || '';
         
-        console.debug(`AP ${ap.serial} (${ap.name}): connectedTo="${connectedTo}", connectedPort="${connectedPort}"`);
+        logger.debug(`AP ${ap.serial} (${ap.name}): connectedTo="${connectedTo}", connectedPort="${connectedPort}"`);
         
         // Si connectedPort est├í vac├¡o, intentar extraer desde connectedTo
         // Formato: "615285 - appliance / 3" o "Z3/Port 5"
@@ -928,7 +1041,7 @@ async function getNetworkSummary(req, res) {
           const portMatch = connectedTo.match(/\/\s*(?:Port\s*)?(\d+)$/i);
           if (portMatch) {
             connectedPort = portMatch[1];
-            console.debug(`  Puerto extra├¡do de connectedTo: ${connectedPort}`);
+            logger.debug(`  Puerto extra├¡do de connectedTo: ${connectedPort}`);
           }
         }
         
@@ -937,7 +1050,7 @@ async function getNetworkSummary(req, res) {
         // Si NO contiene "SW" o "MS" (switch), entonces est├í conectado directo al Z3
         const isConnectedToSwitch = /\b(SW|MS|Switch)\b/i.test(connectedTo);
         
-        console.debug(`  isConnectedToSwitch: ${isConnectedToSwitch}, isGAP: ${isGAP}`);
+        logger.debug(`  isConnectedToSwitch: ${isConnectedToSwitch}, isGAP: ${isGAP}`);
         
         if (!isConnectedToSwitch && connectedPort && connectedPort !== '-') {
           // Extraer n├║mero de puerto
@@ -948,11 +1061,11 @@ async function getNetworkSummary(req, res) {
           // CORRECCI├ôN: En GAP, el AP SIEMPRE est├í en puerto 5 (PoE)
           // El LLDP a veces reporta puerto incorrecto
           if (isGAP) {
-            console.debug(`  Configuraci├│n GAP detectada - forzando puerto 5 (era ${apPortOnZ3})`);
+            logger.debug(`  Configuraci├│n GAP detectada - forzando puerto 5 (era ${apPortOnZ3})`);
             apPortOnZ3 = '5';
           }
           
-          console.debug(`  Puerto final: ${apPortOnZ3}`);
+          logger.debug(`  Puerto final: ${apPortOnZ3}`);
           
           if (apPortOnZ3) {
             const apName = ap.name || ap.model || ap.serial;
@@ -965,14 +1078,47 @@ async function getNetworkSummary(req, res) {
               _sourceMethod: isGAP ? 'gap-rule-port5' : 'lldp-ap-processed',
             });
             
-            console.debug(`Ô£ô Puerto ${apPortOnZ3} del Z3 al AP ${apName}`);
+            logger.debug(`✓ Puerto ${apPortOnZ3} del Z3 al AP ${apName}`);
           }
         }
       });
     }
 
+    // PASO 3: Inferencia por modelo cuando no hay LLDP directo (fallback)
+    // Si hay switches pero no detectamos puerto de conexión, inferir por modelo
+    if (!portConnectivity.size && switchesDetailed.length > 0 && applianceModel) {
+      const modelUpper = applianceModel.toString().toUpperCase().trim();
+      
+      // Mapeo modelo → puerto típico de uplink LAN
+      let inferredPort = null;
+      if (modelUpper.startsWith('MX84') || modelUpper.startsWith('MX100')) {
+        inferredPort = '10'; // MX84/100: último puerto LAN es típicamente el uplink
+      } else if (modelUpper.startsWith('MX64') || modelUpper.startsWith('MX65') || modelUpper.startsWith('MX67') || modelUpper.startsWith('MX68')) {
+        inferredPort = '3'; // MX64/65/67/68: tienen menos puertos, puerto 3 es común
+      } else if (modelUpper.startsWith('MX250') || modelUpper.startsWith('MX450')) {
+        inferredPort = '11'; // Modelos enterprise con más puertos
+      } else if (modelUpper.startsWith('Z3') || modelUpper.startsWith('Z4')) {
+        inferredPort = '5'; // Z-series: puerto 5 es el PoE/LAN principal
+      }
+      
+      if (inferredPort) {
+        const firstSwitch = switchesDetailed[0];
+        const switchName = firstSwitch.name || firstSwitch.serial;
+        
+        portConnectivity.set(inferredPort, {
+          deviceSerial: firstSwitch.serial,
+          devicePort: '-',
+          deviceName: switchName,
+          deviceType: 'switch',
+          _sourceMethod: 'model-inference',
+        });
+        
+        logger.info(`✓ Puerto ${inferredPort} inferido por modelo ${applianceModel} al switch ${switchName}`);
+      }
+    }
+
     if (!portConnectivity.size) {
-  console.info(`No se detectaron conexiones de switches/APs al appliance`);
+      logger.info(`No se detectaron conexiones de switches/APs al appliance`);
       return ports;
     }
 
@@ -997,6 +1143,7 @@ async function getNetworkSummary(req, res) {
           // Force connected status for UI display (green indicator)
           statusNormalized: 'connected',
           status: 'active',
+          hasCarrier: true, // ← Critical para que el puerto se muestre verde
           _connectivitySource: connectivity._sourceMethod,
           // Tooltip metadata
           tooltipInfo: {
@@ -1016,7 +1163,7 @@ async function getNetworkSummary(req, res) {
     });
 
     const enrichedCount = enrichedPorts.filter((p) => p.connectedTo).length;
-  console.debug(`${enrichedCount}/${ports.length} puertos enriquecidos con conectividad`);
+  logger.debug(`${enrichedCount}/${ports.length} puertos enriquecidos con conectividad`);
 
     return enrichedPorts;
   };
@@ -1071,11 +1218,11 @@ async function getNetworkSummary(req, res) {
       if (switchLinks.length) {
         // Mantener solo el primer enlace a switch (normalmente el principal)
         keepLinks.push(switchLinks[0]);
-        console.debug(`Appliance ${applianceSerial}: manteniendo enlace a ${switchLinks[0].target === applianceSerial ? switchLinks[0].source : switchLinks[0].target}, eliminando ${linksFromAppliance.length - 1} duplicados`);
+        logger.debug(`Appliance ${applianceSerial}: manteniendo enlace a ${switchLinks[0].target === applianceSerial ? switchLinks[0].source : switchLinks[0].target}, eliminando ${linksFromAppliance.length - 1} duplicados`);
       } else {
         // Si no hay enlaces a switches, mantener el primero que haya
         keepLinks.push(linksFromAppliance[0]);
-        console.debug(`Appliance ${applianceSerial}: sin enlaces a switches, manteniendo primer enlace disponible`);
+        logger.debug(`Appliance ${applianceSerial}: sin enlaces a switches, manteniendo primer enlace disponible`);
       }
     });
 
@@ -1529,7 +1676,7 @@ async function getNetworkSummary(req, res) {
   };
 
   try {
-  console.info(`Iniciando carga paralela para ${networkId}`);
+  logger.info(`Iniciando carga paralela para ${networkId}`);
     const orgId = await resolveNetworkOrgId(networkId);
     if (!orgId) {
       throw new Error(`No se pudo resolver la organizationId para el network ${networkId}`);
@@ -1562,7 +1709,7 @@ async function getNetworkSummary(req, res) {
           const status = error?.response?.status;
           if (status === 429 && attempt < maxAttempts - 1) {
             const waitMs = Math.min(maxDelay, baseDelay * Math.pow(2, attempt));
-            console.warn(`L├¡mite de peticiones ${label} (intento ${attempt + 1}/${maxAttempts}). Reintentando en ${waitMs}ms`);
+            logger.warn(`L├¡mite de peticiones ${label} (intento ${attempt + 1}/${maxAttempts}). Reintentando en ${waitMs}ms`);
             await sleep(waitMs);
             continue;
           }
@@ -1577,10 +1724,10 @@ async function getNetworkSummary(req, res) {
     // Intentar reutilizar cach├® por network si existe (permitir bypass con forceLldpRefresh)
     const cachedLldp = !forceLldpRefresh && getFromCache(cache.lldpByNetwork, networkId, 'lldp');
     if (forceLldpRefresh) {
-      console.info(`Bypass cach├® LLDP/CDP solicitado para ${networkId} (forceLldpRefresh)`);
+      logger.info(`Bypass cach├® LLDP/CDP solicitado para ${networkId} (forceLldpRefresh)`);
     }
     if (cachedLldp) {
-      console.info(`Usando cach├® LLDP/CDP para ${networkId} (${Object.keys(cachedLldp).length} entradas)`);
+      logger.info(`Usando cach├® LLDP/CDP para ${networkId} (${Object.keys(cachedLldp).length} entradas)`);
       lldpSnapshots = { ...cachedLldp };
     } else {
       const lldpCache = {};
@@ -1610,18 +1757,18 @@ async function getNetworkSummary(req, res) {
                 const status = error?.response?.status;
                 const message = error?.response?.data || error?.message;
                 const detail = [status, message].filter(Boolean).join(' ');
-                console.warn(`LLDP/CDP no disponible para ${serial}: ${detail}`);
+                logger.warn(`LLDP/CDP no disponible para ${serial}: ${detail}`);
               }
             } else {
               const { serial } = result.reason || {};
-              console.warn(`LLDP/CDP no disponible para ${serial}: ${result.reason}`);
+              logger.warn(`LLDP/CDP no disponible para ${serial}: ${result.reason}`);
             }
           }
           idx += limit;
         }
       }
       if (devicesToScan.length) {
-        console.info(`Obteniendo LLDP/CDP para ${devicesToScan.length} dispositivos (switches + APs) en paralelo (l├¡mite ${CONCURRENCY_LIMIT})...`);
+        logger.info(`Obteniendo LLDP/CDP para ${devicesToScan.length} dispositivos (switches + APs) en paralelo (l├¡mite ${CONCURRENCY_LIMIT})...`);
         await parallelLldpCdp(devicesToScan, CONCURRENCY_LIMIT);
       }
 
@@ -1629,10 +1776,10 @@ async function getNetworkSummary(req, res) {
       try {
         if (Object.keys(lldpSnapshots).length) {
           setInCache(cache.lldpByNetwork, networkId, lldpSnapshots, 'lldp');
-          console.info(`Cach├® LLDP/CDP guardada para ${networkId} (${Object.keys(lldpSnapshots).length} entradas)`);
+          logger.info(`Cach├® LLDP/CDP guardada para ${networkId} (${Object.keys(lldpSnapshots).length} entradas)`);
         }
       } catch (e) {
-        console.warn('Error guardando cach├® LLDP/CDP:', e?.message || e);
+        logger.warn('Error guardando cach├® LLDP/CDP:', e?.message || e);
       }
     }
 
@@ -1733,12 +1880,78 @@ async function getNetworkSummary(req, res) {
     // Agregar datos wireless para visualizar microcortes en conectividad
     if (orgId && accessPoints.length) {
       const wirelessParams = { 'networkIds[]': networkId, timespan: DEFAULT_WIRELESS_TIMESPAN };
-      addTask('wirelessSignalByDevice', getOrgWirelessSignalQualityByDevice(orgId, wirelessParams));
-      addTask('wirelessSignalHistory', getNetworkWirelessSignalQualityHistory(networkId, { timespan: DEFAULT_WIRELESS_TIMESPAN, resolution: 600 }));
-      // TEMPORALMENTE DESHABILITADO: Causa rate limiting (429) con muchos APs
-      // addTask('wirelessFailedConnections', getNetworkWirelessFailedConnections(networkId, { timespan: DEFAULT_WIRELESS_TIMESPAN }));
-      // En su lugar, generamos historial sint├®tico basado en status
-      addTask('wirelessFailedConnections', Promise.resolve([]));
+      
+      // Cachear endpoints wireless críticos para evitar rate limiting en predios grandes
+      const cacheKeyEthernet = `${orgId}:${networkId}:ethernet`;
+      const cacheKeyFailed = `${networkId}:failed:${DEFAULT_WIRELESS_TIMESPAN}`;
+      const cacheKeySignal = `${orgId}:${networkId}:signal:${DEFAULT_WIRELESS_TIMESPAN}`;
+      
+      // Ethernet statuses con caché agresivo (15 min TTL)
+      const cachedEthernet = getFromCache(cache.wirelessEthernetStatuses, cacheKeyEthernet, 'wirelessEthernetStatuses');
+      if (cachedEthernet) {
+        logger.debug(`[Cache] Usando ethernet statuses cacheados para ${networkId} (${cachedEthernet.length} APs)`);
+        addTask('wirelessEthernetStatuses', Promise.resolve(cachedEthernet));
+      } else {
+        addTask('wirelessEthernetStatuses', 
+          getOrgWirelessDevicesEthernetStatuses(orgId, { 'networkIds[]': networkId })
+            .then(data => {
+              if (data && data.length > 0) {
+                setInCache(cache.wirelessEthernetStatuses, cacheKeyEthernet, data, 'wirelessEthernetStatuses');
+                logger.debug(`[Cache] Guardado ethernet statuses para ${networkId} (${data.length} APs, TTL 15min)`);
+              }
+              return data;
+            })
+        );
+      }
+      
+      // Failed connections con caché (10 min TTL) - rehabilitado con caché
+      const cachedFailed = getFromCache(cache.wirelessFailedConnections, cacheKeyFailed, 'wirelessFailedConnections');
+      if (cachedFailed) {
+        logger.debug(`[Cache] Usando failed connections cacheados para ${networkId} (${cachedFailed.length} eventos)`);
+        addTask('wirelessFailedConnections', Promise.resolve(cachedFailed));
+      } else {
+        addTask('wirelessFailedConnections', 
+          getNetworkWirelessFailedConnections(networkId, { timespan: DEFAULT_WIRELESS_TIMESPAN })
+            .then(data => {
+              const dataArray = Array.isArray(data) ? data : [];
+              if (dataArray.length > 0) {
+                setInCache(cache.wirelessFailedConnections, cacheKeyFailed, dataArray, 'wirelessFailedConnections');
+                logger.debug(`[Cache] Guardado failed connections para ${networkId} (${dataArray.length} eventos, TTL 10min)`);
+              }
+              return dataArray;
+            })
+        );
+      }
+      
+      // Signal quality con caché (8 min TTL)
+      const cachedSignal = getFromCache(cache.wirelessSignalQuality, cacheKeySignal, 'wirelessSignalQuality');
+      if (cachedSignal) {
+        logger.debug(`[Cache] Usando signal quality cacheado para ${networkId}`);
+        addTask('wirelessSignalByDevice', Promise.resolve(cachedSignal.byDevice || []));
+        addTask('wirelessSignalHistory', Promise.resolve(cachedSignal.history || []));
+      } else {
+        addTask('wirelessSignalByDevice', 
+          getOrgWirelessSignalQualityByDevice(orgId, wirelessParams)
+            .then(data => {
+              if (data) {
+                const existing = getFromCache(cache.wirelessSignalQuality, cacheKeySignal, 'wirelessSignalQuality') || {};
+                setInCache(cache.wirelessSignalQuality, cacheKeySignal, { ...existing, byDevice: data }, 'wirelessSignalQuality');
+              }
+              return data;
+            })
+        );
+        addTask('wirelessSignalHistory', 
+          getNetworkWirelessSignalQualityHistory(networkId, { timespan: DEFAULT_WIRELESS_TIMESPAN, resolution: 600 })
+            .then(data => {
+              if (data) {
+                const existing = getFromCache(cache.wirelessSignalQuality, cacheKeySignal, 'wirelessSignalQuality') || {};
+                setInCache(cache.wirelessSignalQuality, cacheKeySignal, { ...existing, history: data }, 'wirelessSignalQuality');
+                logger.debug(`[Cache] Guardado signal quality para ${networkId} (TTL 8min)`);
+              }
+              return data;
+            })
+        );
+      }
     }
 
     if (shouldFetchApplianceData) {
@@ -1816,7 +2029,7 @@ async function getNetworkSummary(req, res) {
           configBySerial.set(serialUpper, { serial: sw.serial, map });
         } catch (error) {
           const message = error?.response?.data || error?.message;
-          console.warn(`Configuraci├│n de puertos no disponible para ${sw.serial}: ${message}`);
+          logger.warn(`Configuraci├│n de puertos no disponible para ${sw.serial}: ${message}`);
           configBySerial.set(serialUpper, { serial: sw.serial, map: new Map() });
         }
       }
@@ -1838,7 +2051,7 @@ async function getNetworkSummary(req, res) {
           }
         } catch (error) {
           const message = error?.response?.data || error?.message;
-          console.warn(`Estados de puertos no disponibles para ${sw.serial}: ${message}`);
+          logger.warn(`Estados de puertos no disponibles para ${sw.serial}: ${message}`);
         }
       }
       switchPortStatuses = fallbackStatuses;
@@ -1889,7 +2102,7 @@ async function getNetworkSummary(req, res) {
     });
 
     if (!switchPorts.length && switches.length) {
-  console.warn(`No se pudieron obtener datos de puertos para los switches de ${networkId}`);
+  logger.warn(`No se pudieron obtener datos de puertos para los switches de ${networkId}`);
     }
 
     let applianceUplinks = [];
@@ -1924,7 +2137,7 @@ async function getNetworkSummary(req, res) {
   const uplinkAddressesRaw = optionalResults.applianceUplinkAddresses?.status === 'fulfilled' ? optionalResults.applianceUplinkAddresses.value : [];
 
     const baseElapsed = Date.now() - startTime;
-  console.info(`Carga base completada en ${baseElapsed}ms`);
+  logger.info(`Carga base completada en ${baseElapsed}ms`);
 
     const statusMap = new Map();
     const statusDetailMap = new Map();
@@ -1956,10 +2169,27 @@ async function getNetworkSummary(req, res) {
     const wirelessSignalHistoryRaw = optionalResults.wirelessSignalHistory?.status === 'fulfilled' ? optionalResults.wirelessSignalHistory.value : [];
     const wirelessSignalByClientRaw = optionalResults.wirelessSignalByClient?.status === 'fulfilled' ? optionalResults.wirelessSignalByClient.value : [];
     const wirelessSignalByNetworkRaw = optionalResults.wirelessSignalByNetwork?.status === 'fulfilled' ? optionalResults.wirelessSignalByNetwork.value : [];
+    const wirelessEthernetStatusesRaw = optionalResults.wirelessEthernetStatuses?.status === 'fulfilled' ? optionalResults.wirelessEthernetStatuses.value : [];
+
+    const ethernetStatusMap = new Map();
+    const registerEthernetEntry = (serial, value) => {
+      if (!serial || !value) return;
+      const upper = serial.toString().toUpperCase();
+      if (!upper) return;
+      ethernetStatusMap.set(upper, value);
+      const compact = upper.replace(/-/g, '');
+      if (compact && compact !== upper) {
+        ethernetStatusMap.set(compact, value);
+      }
+    };
+    if (Array.isArray(wirelessEthernetStatusesRaw)) {
+      wirelessEthernetStatusesRaw.forEach((entry) => registerEthernetEntry(entry?.serial, entry));
+    }
+    logger.debug(`Ethernet status - Total registrados: ${ethernetStatusMap.size}, APs a enriquecer: ${accessPoints.length}`);
     
     // Procesar failedConnections correctamente desde Promise.allSettled
     const wirelessFailedConnectionsRaw = optionalResults.wirelessFailedConnections?.status === 'fulfilled' ? optionalResults.wirelessFailedConnections.value : [];
-  console.debug(`Detalles wireless - failedConnections estado: ${optionalResults.wirelessFailedConnections?.status}, tipo de valor: ${typeof wirelessFailedConnectionsRaw}, esArray: ${Array.isArray(wirelessFailedConnectionsRaw)}, longitud: ${Array.isArray(wirelessFailedConnectionsRaw) ? wirelessFailedConnectionsRaw.length : 'N/A'}`);
+  logger.debug(`Detalles wireless - failedConnections estado: ${optionalResults.wirelessFailedConnections?.status}, tipo de valor: ${typeof wirelessFailedConnectionsRaw}, esArray: ${Array.isArray(wirelessFailedConnectionsRaw)}, longitud: ${Array.isArray(wirelessFailedConnectionsRaw) ? wirelessFailedConnectionsRaw.length : 'N/A'}`);
 
     const wirelessInsights = composeWirelessMetrics({
       accessPoints,
@@ -1972,7 +2202,7 @@ async function getNetworkSummary(req, res) {
       timespanSeconds: orgId && accessPoints.length ? DEFAULT_WIRELESS_TIMESPAN : null,
     });
     
-  console.info(`Wireless: insights generados para ${accessPoints.length} APs`);
+  logger.info(`Wireless: insights generados para ${accessPoints.length} APs`);
 
     const switchesDetailed = switches.map((sw) => {
       const swSerialUpper = (sw.serial || '').toUpperCase();
@@ -2044,11 +2274,11 @@ async function getNetworkSummary(req, res) {
       let linkToMx = null; // Para saber si se us├│ topology fallback
       
       const lldpData = lldpSnapshots[sw.serial];
-  console.debug(`LLDP - ${sw.name}: hasLLDP=${!!lldpData}, uplinkPorts=${stats.uplinkPorts.length}`);
+  logger.debug(`LLDP - ${sw.name}: hasLLDP=${!!lldpData}, uplinkPorts=${stats.uplinkPorts.length}`);
       
       if (lldpData && lldpData.ports) {
-  console.debug(`LLDP - ${sw.name} - puertos detectados: ${Object.keys(lldpData.ports).length}`);
-  console.debug(`Uplink disponibles - ${sw.name}: ${stats.uplinkPorts.map(p => `${p.portId}(${p.status})`).join(', ')}`);
+  logger.debug(`LLDP - ${sw.name} - puertos detectados: ${Object.keys(lldpData.ports).length}`);
+  logger.debug(`Uplink disponibles - ${sw.name}: ${stats.uplinkPorts.map(p => `${p.portId}(${p.status})`).join(', ')}`);
         
         // Buscar el puerto uplink activo en los datos LLDP
         activeUplink = stats.uplinkPorts.find(p => {
@@ -2056,7 +2286,7 @@ async function getNetworkSummary(req, res) {
           return st === 'connected' || st === 'online' || st.includes('active');
         });
 
-  console.debug(`Active uplink - ${sw.name}: ${activeUplink ? `Puerto ${activeUplink.portId}` : 'NINGUNO'}`);
+  logger.debug(`Active uplink - ${sw.name}: ${activeUplink ? `Puerto ${activeUplink.portId}` : 'NINGUNO'}`);
 
         if (activeUplink) {
           const uplinkPortId = activeUplink.portId.toString();
@@ -2065,21 +2295,21 @@ async function getNetworkSummary(req, res) {
           // Las KEYS son los port IDs, no hay campo portId dentro del objeto
           lldpPort = lldpData.ports[uplinkPortId];
           
-          console.debug(`${sw.name} - Buscando LLDP para uplinkPortId: "${uplinkPortId}"`);
-          console.debug(`${sw.name} - Keys disponibles en lldpData.ports (muestra): ${Object.keys(lldpData.ports).slice(0, 5).join(', ')}`);
-          console.debug(`${sw.name} - Tiene puerto 23?: ${lldpData.ports['23'] ? 'S├ì' : 'NO'}`);
-          console.debug(`${sw.name} - lldpPort para puerto ${uplinkPortId}: ${lldpPort ? 'ENCONTRADO' : 'NO ENCONTRADO'}`);
+          logger.debug(`${sw.name} - Buscando LLDP para uplinkPortId: "${uplinkPortId}"`);
+          logger.debug(`${sw.name} - Keys disponibles en lldpData.ports (muestra): ${Object.keys(lldpData.ports).slice(0, 5).join(', ')}`);
+          logger.debug(`${sw.name} - Tiene puerto 23?: ${lldpData.ports['23'] ? 'S├ì' : 'NO'}`);
+          logger.debug(`${sw.name} - lldpPort para puerto ${uplinkPortId}: ${lldpPort ? 'ENCONTRADO' : 'NO ENCONTRADO'}`);
           
           if (lldpPort) {
             const lldpInfo = lldpPort.lldp || lldpPort.cdp;
-            console.debug(`${sw.name} - lldpInfo: ${lldpInfo ? `${lldpInfo.deviceId || lldpInfo.systemName} port:${lldpInfo.portId || lldpInfo.portDescription}` : 'NO ENCONTRADO'}`);
+            logger.debug(`${sw.name} - lldpInfo: ${lldpInfo ? `${lldpInfo.deviceId || lldpInfo.systemName} port:${lldpInfo.portId || lldpInfo.portDescription}` : 'NO ENCONTRADO'}`);
             
             if (lldpInfo) {
               const remoteName = lldpInfo.deviceId || lldpInfo.systemName || 'Unknown';
               const remotePort = lldpInfo.portId || lldpInfo.portDescription;
               
-              console.debug(`${sw.name} - remoteName: "${remoteName}", remotePort: "${remotePort}"`);
-              console.debug(`${sw.name} - MX device: name=${mxDevice?.name}, serial=${mxDevice?.serial}, model=${mxDevice?.model}`);
+              logger.debug(`${sw.name} - remoteName: "${remoteName}", remotePort: "${remotePort}"`);
+              logger.debug(`${sw.name} - MX device: name=${mxDevice?.name}, serial=${mxDevice?.serial}, model=${mxDevice?.model}`);
               
               // Intentar extraer n├║mero de puerto del remotePort
               const portMatch = remotePort ? remotePort.match(/(\d+)/) : null;
@@ -2092,7 +2322,7 @@ async function getNetworkSummary(req, res) {
                 remoteName.toLowerCase().includes('mx') // Fallback: cualquier MX
               );
               
-              console.debug(`${sw.name} - isConnectedToAppliance=${isConnectedToAppliance}, uplinkPortOnRemote=${uplinkPortOnRemote}`);
+              logger.debug(`${sw.name} - isConnectedToAppliance=${isConnectedToAppliance}, uplinkPortOnRemote=${uplinkPortOnRemote}`);
               
               if (isConnectedToAppliance && uplinkPortOnRemote) {
                 connectedTo = `${mxDevice.name || mxDevice.model}/Port ${uplinkPortOnRemote}`;
@@ -2102,21 +2332,21 @@ async function getNetworkSummary(req, res) {
                 connectedTo = remoteName;
               }
               
-              console.info(`Switch ${sw.name} puerto ${uplinkPortId} conectado a ${connectedTo}`);
+              logger.info(`Switch ${sw.name} puerto ${uplinkPortId} conectado a ${connectedTo}`);
             }
           } else {
             // FALLBACK: Si no hay LLDP del puerto uplink, buscar en topolog├¡a si est├í conectado al MX
-            console.debug(`${sw.name} - Buscando conexi├│n en topolog├¡a de red como fallback`);
-            console.debug(`${sw.name} - rawTopology disponible=${!!rawTopology}, links=${rawTopology?.links?.length || 0}, mxDevice=${!!mxDevice}`);
+            logger.debug(`${sw.name} - Buscando conexi├│n en topolog├¡a de red como fallback`);
+            logger.debug(`${sw.name} - rawTopology disponible=${!!rawTopology}, links=${rawTopology?.links?.length || 0}, mxDevice=${!!mxDevice}`);
             
             if (rawTopology && rawTopology.links && mxDevice) {
               // Buscar enlace entre este switch y el MX en la topolog├¡a
               const swSerial = sw.serial.toUpperCase();
               const mxSerial = mxDevice.serial.toUpperCase();
               
-              console.debug(`Buscando enlace entre ${swSerial} y ${mxSerial} en topolog├¡a`);
-              console.debug(`Primer enlace (muestra): ${JSON.stringify(rawTopology.links[0], null, 2)}`);
-              console.debug(`Keys del primer enlace (muestra): ${Object.keys(rawTopology.links[0] || {}).slice(0,5).join(', ')}`);
+              logger.debug(`Buscando enlace entre ${swSerial} y ${mxSerial} en topolog├¡a`);
+              logger.debug(`Primer enlace (muestra): ${JSON.stringify(rawTopology.links[0], null, 2)}`);
+              logger.debug(`Keys del primer enlace (muestra): ${Object.keys(rawTopology.links[0] || {}).slice(0,5).join(', ')}`);
               
               linkToMx = rawTopology.links.find(link => {
                 // La estructura de Meraki usa "ends" array con 2 elementos
@@ -2129,7 +2359,7 @@ async function getNetworkSummary(req, res) {
                                    (end1Serial === swSerial && end0Serial === mxSerial);
                 
                 if (matchFound) {
-                  console.debug(`Enlace encontrado: ${end0Serial} <-> ${end1Serial}`);
+                  logger.debug(`Enlace encontrado: ${end0Serial} <-> ${end1Serial}`);
                 }
                 
                 return matchFound;
@@ -2140,8 +2370,8 @@ async function getNetworkSummary(req, res) {
                 const mxEnd = linkToMx.ends.find(end => end.device?.serial?.toUpperCase() === mxSerial);
                 const swEnd = linkToMx.ends.find(end => end.device?.serial?.toUpperCase() === swSerial);
                 
-                console.debug(`Enlace MXÔåöSwitch encontrado`);
-                console.debug(`Switch puerto detectado: ${swEnd?.discovered?.lldp?.portId || swEnd?.discovered?.cdp?.portId || 'unknown'}`);
+                logger.debug(`Enlace MXÔåöSwitch encontrado`);
+                logger.debug(`Switch puerto detectado: ${swEnd?.discovered?.lldp?.portId || swEnd?.discovered?.cdp?.portId || 'unknown'}`);
                 
                 // El MX no responde LLDP, pero podemos obtener el puerto de varias fuentes:
                 // 1. Desde organizationUplinksRaw (m├ís confiable)
@@ -2160,7 +2390,7 @@ async function getNetworkSummary(req, res) {
                   if (switchUplink) {
                     // El switch reporta su puerto uplink (ej: "23")
                     const switchUplinkPort = switchUplink.port || switchUplink.uplinkPort || switchUplink.interface;
-                    console.debug(`Switch ${sw.name} reporta uplink en su puerto: ${switchUplinkPort}`);
+                    logger.debug(`Switch ${sw.name} reporta uplink en su puerto: ${switchUplinkPort}`);
                     
                     // Ahora buscar el MX para ver qu├® puertos LAN tiene activos
                     const mxUplinks = organizationUplinksRaw.filter(uplink => 
@@ -2168,7 +2398,7 @@ async function getNetworkSummary(req, res) {
                       uplink.networkId === networkId
                     );
                     
-                    console.debug(`MX tiene ${mxUplinks.length} uplinks reportados`);
+                    logger.debug(`MX tiene ${mxUplinks.length} uplinks reportados`);
                     
                     // Los MX reportan sus uplinks WAN, pero la conexi├│n al switch es por puerto LAN
                     // Sin embargo, podemos inferir el puerto LAN buscando en la topolog├¡a procesada
@@ -2188,17 +2418,17 @@ async function getNetworkSummary(req, res) {
                     // Fallback gen├®rico: puerto 10
                     inferredMxPort = '10';
                   }
-                  console.debug(`Usando inferencia por modelo ${model} -> Puerto ${inferredMxPort}`);
+                  logger.debug(`Usando inferencia por modelo ${model} -> Puerto ${inferredMxPort}`);
                 }
                 
                 uplinkPortOnRemote = inferredMxPort;
                 connectedTo = `${mxDevice.model}/Port ${uplinkPortOnRemote}`;
-                console.debug(`${sw.name} -> MX Puerto ${uplinkPortOnRemote}`);
+                logger.debug(`${sw.name} -> MX Puerto ${uplinkPortOnRemote}`);
               } else {
-                console.debug(`No se encontr├│ enlace entre ${swSerial} y ${mxSerial}`);
+                logger.debug(`No se encontr├│ enlace entre ${swSerial} y ${mxSerial}`);
               }
             } else {
-              console.debug(`Requisitos no cumplidos para fallback - rawTopology:${!!rawTopology}, links:${!!rawTopology?.links}, mxDevice:${!!mxDevice}`);
+              logger.debug(`Requisitos no cumplidos para fallback - rawTopology:${!!rawTopology}, links:${!!rawTopology?.links}, mxDevice:${!!mxDevice}`);
             }
           }
         }
@@ -2281,10 +2511,10 @@ async function getNetworkSummary(req, res) {
     let topologySource = 'meraki-link-layer';
     const hasValidMerakiTopology = (merakiGraph.nodes?.length || 0) > 1 && (merakiGraph.links?.length || 0) > 0;
 
-  console.info(`Topolog├¡a Meraki - nodos: ${merakiGraph.nodes.length}, enlaces: ${merakiGraph.links.length}`);
+  logger.info(`Topolog├¡a Meraki - nodos: ${merakiGraph.nodes.length}, enlaces: ${merakiGraph.links.length}`);
 
     if (!hasValidMerakiTopology) {
-  console.info(`Topolog├¡a Meraki incompleta para ${networkId}, intentando reconstrucci├│n v├¡a LLDP`);
+  logger.info(`Topolog├¡a Meraki incompleta para ${networkId}, intentando reconstrucci├│n v├¡a LLDP`);
       const cachedLldpMap = getFromCache(cache.lldpByNetwork, networkId, 'lldp') || {};
       // Incluir elementos cacheados primero
       Object.keys(cachedLldpMap).forEach((s) => { if (!lldpSnapshots[s]) lldpSnapshots[s] = cachedLldpMap[s]; });
@@ -2312,14 +2542,14 @@ async function getNetworkSummary(req, res) {
       if (fallbackTopology.nodes.length || fallbackTopology.links.length) {
         topologyGraph = fallbackTopology;
         topologySource = 'lldp-fallback';
-  console.info(`Topolog├¡a reconstruida v├¡a LLDP para ${networkId}: ${fallbackTopology.nodes.length} nodos, ${fallbackTopology.links.length} enlaces`);
+  logger.info(`Topolog├¡a reconstruida v├¡a LLDP para ${networkId}: ${fallbackTopology.nodes.length} nodos, ${fallbackTopology.links.length} enlaces`);
       } else {
         topologyGraph = { nodes: [], links: [] };
         topologySource = 'empty';
-  console.info(`Topolog├¡a vac├¡a para ${networkId} tras intentar LLDP`);
+  logger.info(`Topolog├¡a vac├¡a para ${networkId} tras intentar LLDP`);
       }
     } else {
-  console.debug(`Topolog├¡a Meraki v├ílida; reconstrucci├│n LLDP omitida`);
+  logger.debug(`Topolog├¡a Meraki v├ílida; reconstrucci├│n LLDP omitida`);
     }
 
     const applianceAnchors = [mxDevice, ...utmDevices].filter(Boolean);
@@ -2339,26 +2569,105 @@ async function getNetworkSummary(req, res) {
       if (!hadData && !ap.connectedTo) {
         ap.connectedTo = '-';
       }
-      if (!ap.wiredSpeed) {
-        ap.wiredSpeed = '1000 Mbps';
+      // No asignar fallback aquí - dejar que ethernetStatus lo complete
+      const serialUpper = (ap?.serial || '').toString().toUpperCase();
+      const ethernetStatus = ethernetStatusMap.get(serialUpper) || ethernetStatusMap.get(serialUpper.replace(/-/g, ''));
+      if (ethernetStatus) {
+        logger.debug(`AP ${ap.serial} - ethernet RAW:`, JSON.stringify(ethernetStatus));
+        
+        // Extraer velocidad de la estructura real de Meraki API
+        let speedValue = null;
+        
+        // 1. Intentar desde aggregation.speed (velocidad agregada)
+        if (ethernetStatus.aggregation && Number.isFinite(ethernetStatus.aggregation.speed)) {
+          speedValue = ethernetStatus.aggregation.speed;
+        }
+        
+        // 2. Intentar desde ports[0].linkNegotiation.speed (primer puerto)
+        if (!speedValue && Array.isArray(ethernetStatus.ports) && ethernetStatus.ports.length > 0) {
+          const firstPort = ethernetStatus.ports[0];
+          if (firstPort.linkNegotiation && Number.isFinite(firstPort.linkNegotiation.speed)) {
+            speedValue = firstPort.linkNegotiation.speed;
+          }
+        }
+        
+        // 3. Fallback a campos directos (por si cambia la API)
+        if (!speedValue) {
+          const numericSpeedValue = Number(ethernetStatus.speedMbps || ethernetStatus.linkSpeedMbps || ethernetStatus.speed);
+          if (Number.isFinite(numericSpeedValue)) {
+            speedValue = numericSpeedValue;
+          }
+        }
+        
+        // Formatear velocidad
+        let finalSpeed = null;
+        if (speedValue) {
+          // Convertir a formato legible
+          if (speedValue >= 10000) {
+            finalSpeed = `${speedValue / 1000} Gbps`;
+          } else if (speedValue >= 2500) {
+            finalSpeed = '2.5 Gbps';
+          } else {
+            finalSpeed = `${speedValue} Mbps`;
+          }
+        } else {
+          // Si hay ethernetStatus pero no velocidad, inferir del modelo
+          // Si no hay ethernetStatus en absoluto, quedará como null (mostrará '-')
+          finalSpeed = inferSpeedFromModel(ap.model) || null;
+        }
+        
+        logger.debug(`AP ${ap.serial} - ethernet: speedValue=${speedValue}, finalSpeed=${finalSpeed}`);
+        ap.wiredSpeed = finalSpeed;
+        if (ethernetStatus.power || ethernetStatus.powerSource) {
+          ap.power = ethernetStatus.power || ethernetStatus.powerSource;
+        }
+        if (ethernetStatus.duplex || ethernetStatus.duplexMode) {
+          ap.duplex = ethernetStatus.duplex || ethernetStatus.duplexMode;
+        }
+      } else {
+        // FALLBACK: Si ethernet status no disponible (429/timeout)
+        // Mostrar '-' para indicar que no tenemos datos reales
+        // El usuario verá la velocidad real cuando el caché se actualice
+        logger.debug(`AP ${ap.serial} - NO ethernet status encontrado, mostrando '-'`);
+        ap.wiredSpeed = null;  // null se mostrará como '-' en el frontend
       }
     });
+
+    // Enriquecer wiredSpeed DEBE ocurrir ANTES de buildAccessPointsPayload
+    // Ya se hizo arriba después de obtener ethernetStatuses, verificar logs
+    
+    const summaryAccessPoints = buildAccessPointsPayload({ accessPoints, wirelessInsights });
+    
+    // Log para debugging de datos wireless
+    logger.debug('📊 [Summary] APs construidos:', summaryAccessPoints.length);
+    if (summaryAccessPoints.length > 0) {
+      const sample = summaryAccessPoints[0];
+      logger.debug('📊 [Summary] Sample AP wireless:', {
+        serial: sample.serial,
+        hasHistory: Array.isArray(sample.wireless?.history) && sample.wireless.history.length > 0,
+        historyLength: sample.wireless?.history?.length || 0,
+        hasFailureHistory: Array.isArray(sample.wireless?.failureHistory) && sample.wireless.failureHistory.length > 0,
+        failureHistoryLength: sample.wireless?.failureHistory?.length || 0,
+        wiredSpeed: sample.wiredSpeed,
+        microDrops: sample.wireless?.microDrops
+      });
+    }
 
     if (shouldFetchApplianceData && !applianceUplinks.length) {
       if (Array.isArray(organizationUplinksRaw) && organizationUplinksRaw.length) {
         applianceUplinks = normalizeApplianceUplinks(organizationUplinksRaw, { serial: mxDevice?.serial });
         if (applianceUplinks.length) {
-          console.info(`Uplinks obtenidos v├¡a endpoint organizacional para ${networkId}`);
+          logger.info(`Uplinks obtenidos v├¡a endpoint organizacional para ${networkId}`);
         }
       } else if (orgId) {
         try {
           const orgUplinksRaw = await getOrgApplianceUplinksStatuses(orgId, { 'networkIds[]': networkId });
           applianceUplinks = normalizeApplianceUplinks(orgUplinksRaw, { serial: mxDevice?.serial });
           if (applianceUplinks.length) {
-            console.info(`Uplinks obtenidos v├¡a endpoint organizacional para ${networkId}`);
+            logger.info(`Uplinks obtenidos v├¡a endpoint organizacional para ${networkId}`);
           }
         } catch (err) {
-          console.warn(`Fallback org appliance uplinks fall├│ para ${networkId}: ${err.message}`);
+          logger.warn(`Fallback org appliance uplinks fall├│ para ${networkId}: ${err.message}`);
         }
       }
     }
@@ -2367,9 +2676,9 @@ async function getNetworkSummary(req, res) {
       try {
         const uplinkFallback = await getDeviceUplink(mxDevice.serial);
     applianceUplinks = normalizeApplianceUplinks(uplinkFallback, { serial: mxDevice.serial });
-  console.info(`Uplinks obtenidos v├¡a fallback de dispositivo para ${mxDevice.serial}`);
+  logger.info(`Uplinks obtenidos v├¡a fallback de dispositivo para ${mxDevice.serial}`);
       } catch (err) {
-  console.warn(`Fall├│ fallback getDeviceUplink para ${mxDevice?.serial}: ${err.message}`);
+  logger.warn(`Fall├│ fallback getDeviceUplink para ${mxDevice?.serial}: ${err.message}`);
       }
     }
 
@@ -2748,7 +3057,7 @@ async function getNetworkSummary(req, res) {
           bandwidth: []
         });
 
-  console.info(`Teleworker ${serial || keySuffix} ┬À uplinks=${teleworkerUplinks.length} ┬À puertos=${teleworkerPorts.length} ┬À series=${teleworkerHistory.length}`);
+  logger.info(`Teleworker ${serial || keySuffix} ┬À uplinks=${teleworkerUplinks.length} ┬À puertos=${teleworkerPorts.length} ┬À series=${teleworkerHistory.length}`);
       });
     }
 
@@ -2818,7 +3127,8 @@ async function getNetworkSummary(req, res) {
       timestamp: new Date().toISOString(),
       networkMetadata,
       networkFlags,
-      applianceMetricsMeta
+      applianceMetricsMeta,
+      accessPoints: summaryAccessPoints,
     };
 
     if (wirelessInsights) {
@@ -2843,7 +3153,7 @@ async function getNetworkSummary(req, res) {
 
     res.json(summary);
   } catch (error) {
-    console.error(`Error en /summary para ${networkId}:`, error.message, error.stack);
+    logger.error(`Error en /summary para ${networkId}:`, error.message, error.stack);
     res.status(500).json({ error: 'Error obteniendo el resumen del network', details: error.message });
   }
 

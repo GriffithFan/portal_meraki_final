@@ -155,6 +155,8 @@ const Tooltip = ({ children, content, position = 'auto', modalOnMobile = true })
   // Si no hay contenido, renderizar children tal cual (hooks ya fueron llamados)
   if (!content) return <>{children}</>;
 
+  const renderContent = typeof content === 'string' ? <div>{content}</div> : content;
+
   return (
     <div
       className={`tooltip-wrapper${visible ? ' tooltip-open' : ''}`}
@@ -180,14 +182,14 @@ const Tooltip = ({ children, content, position = 'auto', modalOnMobile = true })
       {/* Classic inline tooltip for touch devices when modalOnMobile está desactivado */}
       {visible && isTouch && !modalOnMobile && (
         <div className={`tooltip-content tooltip-${calculatedPosition}`}>
-          {typeof content === 'string' ? <div>{content}</div> : content}
+          <div className="tooltip-surface">{renderContent}</div>
         </div>
       )}
 
       {/* Desktop floating tooltip rendered vía portal para evitar clipping */}
       {visible && !isTouch && floatingStyle && typeof document !== 'undefined' && createPortal(
         <div className={`tooltip-content tooltip-${calculatedPosition} tooltip-floating`} style={floatingStyle}>
-          {typeof content === 'string' ? <div>{content}</div> : content}
+          <div className="tooltip-surface">{renderContent}</div>
         </div>,
         document.body
       )}

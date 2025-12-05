@@ -15,3 +15,37 @@ export const DEFAULT_SECTIONS = [
  */
 export const DEFAULT_UPLINK_TIMESPAN = 24 * 3600; // 24h
 export const DEFAULT_UPLINK_RESOLUTION = 300; // 5 min buckets
+
+/**
+ * Headers para evitar caching en peticiones de API
+ * Crítico para evitar problemas de datos obsoletos en producción
+ */
+export const NO_CACHE_HEADERS = {
+  'Cache-Control': 'no-cache, no-store, must-revalidate',
+  'Pragma': 'no-cache',
+  'Expires': '0'
+};
+
+/**
+ * Detecta si la página fue recargada (F5/refresh)
+ * Usa PerformanceNavigationTiming API moderna en lugar de la deprecada
+ * @returns {boolean}
+ */
+export const isPageReload = () => {
+  if (typeof window === 'undefined') return false;
+  
+  // API moderna (recomendada)
+  if (window.performance?.getEntriesByType) {
+    const navEntries = window.performance.getEntriesByType('navigation');
+    if (navEntries.length > 0) {
+      return navEntries[0].type === 'reload';
+    }
+  }
+  
+  // Fallback para navegadores legacy
+  if (window.performance?.navigation) {
+    return window.performance.navigation.type === 1;
+  }
+  
+  return false;
+};

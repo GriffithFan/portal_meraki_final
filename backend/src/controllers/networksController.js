@@ -1,4 +1,5 @@
 // Controlador de networks - gestión de redes, topología, dispositivos
+const { logger } = require('../config/logger');
 const {
   getNetworkInfo,
   getOrganizations,
@@ -429,24 +430,24 @@ exports.getNetworkSection = async (req, res) => {
       }
       
       case 'access_points': {
-        console.log('\n========================================');
-        console.log('PROCESANDO ACCESS POINTS');
-        console.log('========================================');
-        console.log(`Devices disponibles: ${devices.length}`);
-        console.log(`Switches disponibles: ${switches ? switches.length : 'undefined'}`);
-        console.log(`AccessPoints disponibles: ${accessPoints.length}`);
+        logger.debug('\n========================================');
+        logger.debug('PROCESANDO ACCESS POINTS');
+        logger.debug('========================================');
+        logger.debug(`Devices disponibles: ${devices.length}`);
+        logger.debug(`Switches disponibles: ${switches ? switches.length : 'undefined'}`);
+        logger.debug(`AccessPoints disponibles: ${accessPoints.length}`);
         
         logger.debug('Procesando puntos de acceso para', networkId);
         
         const lldpSnapshots = {};
         const wirelessStats = {};
         
-        console.log(`\nTotal de APs recibidos: ${accessPoints.length}`);
-        console.log('\n=== LISTA COMPLETA DE APs ===');
+        logger.debug(`\nTotal de APs recibidos: ${accessPoints.length}`);
+        logger.debug('\n=== LISTA COMPLETA DE APs ===');
         accessPoints.forEach((ap, index) => {
-          console.log(`${index + 1}. Serial: ${ap.serial} | Nombre: ${ap.name || 'Sin nombre'} | Modelo: ${ap.model} | Status: ${ap.status || 'unknown'}`);
+          logger.debug(`${index + 1}. Serial: ${ap.serial} | Nombre: ${ap.name || 'Sin nombre'} | Modelo: ${ap.model} | Status: ${ap.status || 'unknown'}`);
         });
-        console.log('==============================\n');
+        logger.debug('==============================\n');
         
         // Obtener información de puertos de switches para cruzar velocidades
         let switchPortsRaw = [];
@@ -462,11 +463,11 @@ exports.getNetworkSection = async (req, res) => {
           try {
             const params = { 'networkIds[]': networkId };
             wirelessEthernetStatuses = await getOrgWirelessDevicesEthernetStatuses(orgId, params);
-            console.log(`\n=== WIRELESS ETHERNET STATUSES (${wirelessEthernetStatuses.length}) ===`);
+            logger.debug(`\n=== WIRELESS ETHERNET STATUSES (${wirelessEthernetStatuses.length}) ===`);
             wirelessEthernetStatuses.forEach(status => {
-              console.log(`Serial: ${status.serial} | Speed: ${status.speed} | Power: ${status.power}`);
+              logger.debug(`Serial: ${status.serial} | Speed: ${status.speed} | Power: ${status.power}`);
             });
-            console.log('==========================================\n');
+            logger.debug('==========================================\n');
           } catch (err) {
             logger.warn('No se pudo obtener wireless ethernet statuses');
           }
@@ -535,43 +536,32 @@ exports.getNetworkSection = async (req, res) => {
           }
           
           const connectedTo = (switchName && portNum) ? `${switchName}/Port ${portNum}` : (switchName || '-');
-          let wiredSpeed = '1000 Mbps';
+          let wiredSpeed = null; // Mostrar '-' hasta obtener datos reales
           
           // PRIORIDAD 1: Buscar en wireless ethernet statuses (más confiable)
           const ethernetStatus = wirelessEthernetStatuses.find(s => s.serial === ap.serial);
           if (ethernetStatus && ethernetStatus.speed) {
             wiredSpeed = ethernetStatus.speed;
-            console.log(`[AP ${ap.serial}] Speed from wirelessEthernetStatuses: ${wiredSpeed}`);
+            logger.debug(`[AP ${ap.serial}] Speed from wirelessEthernetStatuses: ${wiredSpeed}`);
           } else {
             // PRIORIDAD 2: Intentar obtener velocidad desde LLDP/CDP del AP
             if (port) {
               const { lldp: lldpData, cdp } = port;
               const portSpeed = lldpData?.portSpeed || cdp?.portSpeed || '';
               
-              if (portSpeed && portSpeed.includes('1000')) {
-                wiredSpeed = '1000 Mbps';
-              } else if (portSpeed && portSpeed.includes('100')) {
-                wiredSpeed = '100 Mbps';
-              } else if (portSpeed && portSpeed.includes('10000')) {
+              // Solo asignar si hay dato real de velocidad en LLDP/CDP
+              if (portSpeed && portSpeed.includes('10000')) {
                 wiredSpeed = '10000 Mbps';
-              } else {
-                // Fallback: detectar desde modelo de switch
-                const platform = cdp?.platform || lldpData?.systemDescription || '';
-                
-                if (platform.includes('MS225') || platform.includes('MS250') || platform.includes('MS350')) {
-                  wiredSpeed = '1000 Mbps';
-                } else if (platform.includes('MS120') || platform.includes('MS125')) {
-                  wiredSpeed = '1000 Mbps';
-                } else if (platform.toLowerCase().includes('gigabit')) {
-                  wiredSpeed = '1000 Mbps';
-                } else if (platform.toLowerCase().includes('fast ethernet') || platform.includes('100')) {
-                  wiredSpeed = '100 Mbps';
-                }
+              } else if (portSpeed && portSpeed.includes('1000')) {
+                wiredSpeed = '1000 Mbps';
+              } else if (portSpeed && /\b100\b/.test(portSpeed)) {
+                wiredSpeed = '100 Mbps';
               }
+              // NO inferir velocidad desde modelo de switch - dejamos null para mostrar '-'
             }
             
-            // PRIORIDAD 3: Si aún es default, buscar en puertos del switch
-            if (wiredSpeed === '1000 Mbps' && switchName && portNum) {
+            // PRIORIDAD 3: Si aún es null, buscar en puertos del switch
+            if (!wiredSpeed && switchName && portNum) {
               const targetSwitch = switches.find(sw => 
                 sw.name?.includes(switchName) || sw.serial === switchName
               );
@@ -590,12 +580,31 @@ exports.getNetworkSection = async (req, res) => {
                       wiredSpeed = linkSpeed.includes('Mbps') ? linkSpeed : `${linkSpeed} Mbps`;
                     }
                   }
-                  console.log(`[AP ${ap.serial}] Speed from switch port: ${wiredSpeed}`);
+                  logger.debug(`[AP ${ap.serial}] Speed from switch port: ${wiredSpeed}`);
                 }
               }
             }
           }
           
+          const tooltipInfo = {
+            type: 'access-point',
+            name: ap.name || ap.serial,
+            model: ap.model,
+            serial: ap.serial,
+            mac: ap.mac,
+            firmware: ap.firmware,
+            lanIp: ap.lanIp,
+            status: statusMap.get(ap.serial)?.status || ap.status,
+            signalQuality: null,
+            clients: null,
+            microDrops: 0,
+            microDurationSeconds: 0,
+            connectedTo,
+            wiredPort: port?.cdp?.portId || port?.lldp?.portId || '-',
+            wiredSpeed,
+            power: ethernetStatus?.power || null
+          };
+
           return {
             serial: ap.serial,
             name: ap.name,
@@ -615,7 +624,8 @@ exports.getNetworkSection = async (req, res) => {
               successRate: stats.success && stats.assoc 
                 ? ((stats.success / stats.assoc) * 100).toFixed(1) + '%' 
                 : 'N/A'
-            } : null
+            } : null,
+            tooltipInfo
           };
         });
         
@@ -625,14 +635,14 @@ exports.getNetworkSection = async (req, res) => {
         const switchCount = (switches && Array.isArray(switches)) ? switches.length : 0;
         const isGAPConfiguration = hasZ3 && switchCount === 0 && result.accessPoints.length === 1;
         
-        console.log(`[GAP Detection] hasZ3=${hasZ3}, switchCount=${switchCount}, APcount=${result.accessPoints.length}, isGAP=${isGAPConfiguration}`);
+        logger.debug(`[GAP Detection] hasZ3=${hasZ3}, switchCount=${switchCount}, APcount=${result.accessPoints.length}, isGAP=${isGAPConfiguration}`);
         
         if (isGAPConfiguration) {
           logger.debug('Configuración GAP detectada - corrigiendo puerto del AP a puerto 5 (PoE)');
           result.accessPoints = result.accessPoints.map(ap => {
             // Buscar el nombre del appliance/predio desde connectedTo
             const connectedDevice = ap.connectedTo.split('/')[0].trim();
-            console.log(`[GAP Fix] AP ${ap.serial}: "${ap.connectedTo}" -> "${connectedDevice}/Port 5"`);
+            logger.debug(`[GAP Fix] AP ${ap.serial}: "${ap.connectedTo}" -> "${connectedDevice}/Port 5"`);
             return {
               ...ap,
               connectedTo: `${connectedDevice}/Port 5`,

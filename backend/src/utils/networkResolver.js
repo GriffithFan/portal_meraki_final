@@ -1,6 +1,7 @@
 const { getNetworkInfo, getOrganizations, getNetworks } = require('../merakiApi');
 const { getPredioInfoForNetwork } = require('../prediosManager');
 const { cache, getFromCache, setInCache } = require('../cache/cacheStore');
+const { logger } = require('../config/logger');
 
 async function resolveNetworkOrgId(networkId) {
   try {
@@ -16,7 +17,7 @@ async function resolveNetworkOrgId(networkId) {
     }
     if (net.organizationId) return net.organizationId;
   } catch (error) {
-    console.error(`Error resolviendo orgId para ${networkId} (fase 1): ${error.message}`);
+    logger.error(`Error resolviendo orgId para ${networkId} (fase 1): ${error.message}`);
   }
 
   try {
@@ -28,7 +29,7 @@ async function resolveNetworkOrgId(networkId) {
       if (nets.find((n) => n.id === networkId)) return org.id;
     }
   } catch (error) {
-    console.error(`Error resolviendo orgId para ${networkId} (fase 2): ${error.message}`);
+    logger.error(`Error resolviendo orgId para ${networkId} (fase 2): ${error.message}`);
   }
 
   return null;

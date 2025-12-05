@@ -1,6 +1,7 @@
 const fs = require('fs');
 const path = require('path');
 
+const { logger } = require('./config/logger');
 const { getOrganizations, getNetworks } = require('./merakiApi');
 const { loadPrediosFromCSV, refreshCache } = require('./prediosManager');
 const { extractPredioCode, determineRegion, determineEstado } = require('../scripts/loadAllPredios');
@@ -103,7 +104,7 @@ async function fetchNetworksForOrg(org) {
     const networks = await getNetworks(org.id);
     return networks || [];
   } catch (error) {
-    console.error(`Error obteniendo redes para la organización ${org.id}:`, error.response?.data || error.message);
+    logger.error(`Error obteniendo redes para la organización ${org.id}:`, { data: error.response?.data || error.message });
     return [];
   }
 }
@@ -264,7 +265,7 @@ async function syncPrediosCsv({ force = false } = {}) {
     }
     if (dedupeInfo.removed > 0) {
       refreshCache();
-      console.log(`CSV de predios deduplicado: ${dedupeInfo.removed} filas eliminadas, ${dedupeInfo.retained} vigentes.`);
+      logger.info(`CSV de predios deduplicado: ${dedupeInfo.removed} filas eliminadas, ${dedupeInfo.retained} vigentes.`);
     }
 
     summary.durationMs = Date.now() - start;
@@ -273,7 +274,7 @@ async function syncPrediosCsv({ force = false } = {}) {
     return summary;
   } catch (error) {
   const message = error.response?.data || error.message;
-  console.error('Error sincronizando predios:', message);
+  logger.error('Error sincronizando predios:', { error: message });
     if (!summary.totalPredios) {
       summary.totalPredios = force && rebuildAccumulator ? rebuildAccumulator.size : existingNetworkIds.size;
     }
@@ -290,7 +291,7 @@ async function syncPrediosCsv({ force = false } = {}) {
 function startPrediosAutoRefresh() {
   const intervalMinutes = Number(process.env.PREDIOS_REFRESH_INTERVAL_MINUTES || DEFAULT_INTERVAL_MINUTES);
   if (!Number.isFinite(intervalMinutes) || intervalMinutes <= 0) {
-    console.log('Auto refresh de predios deshabilitado (intervalo inválido o <= 0).');
+    logger.info('Auto refresh de predios deshabilitado (intervalo inválido o <= 0).');
     return;
   }
 
@@ -300,12 +301,12 @@ function startPrediosAutoRefresh() {
   const scheduleRun = () => {
       syncPrediosCsv().then((result) => {
       if (result.skipped) {
-        console.log('Sincronización de predios saltada (ejecución en curso).');
+        logger.info('Sincronización de predios saltada (ejecución en curso).');
         return;
       }
-      console.log(`Sincronización de predios completada: ${result.newPredios} nuevos, ${result.processedOrganizations}/${result.totalOrganizations} orgs procesadas en ${result.durationMs}ms.`);
+      logger.info(`Sincronización de predios completada: ${result.newPredios} nuevos, ${result.processedOrganizations}/${result.totalOrganizations} orgs procesadas en ${result.durationMs}ms.`);
     }).catch((error) => {
-      console.error('Error en ejecución periódica de predios:', error.response?.data || error.message);
+      logger.error('Error en ejecución periódica de predios:', { data: error.response?.data || error.message });
     });
   };
 
@@ -314,7 +315,7 @@ function startPrediosAutoRefresh() {
   }
   setInterval(scheduleRun, intervalMs);
 
-  console.log(`Auto refresh de predios habilitado cada ${intervalMinutes} minutos (primer ejecución en ${initialDelayMs}ms).`);
+  logger.info(`Auto refresh de predios habilitado cada ${intervalMinutes} minutos (primer ejecución en ${initialDelayMs}ms).`);
 }
 
 function getLastRunSummary() {

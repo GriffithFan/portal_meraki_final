@@ -54,6 +54,8 @@ const ApplianceHistoricalCharts = ({ networkId }) => {
           setData(result);
         }
       } catch (error) {
+        console.error('Error fetching appliance historical data:', error);
+        setData({ connectivity: [], uplinkUsage: [] });
       } finally {
         setLoading(false);
       }

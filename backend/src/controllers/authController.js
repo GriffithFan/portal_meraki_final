@@ -1,21 +1,58 @@
 // Controlador de autenticación
-const { validarTecnico, listarTecnicos, agregarTecnico, eliminarTecnico } = require('../usuario');
-const { logAdmin } = require('../config/logger');
+const jwt = require('jsonwebtoken');
+const { validarTecnico, buscarTecnico, listarTecnicos, agregarTecnico, eliminarTecnico } = require('../usuario');
+const { logAdmin, logger } = require('../config/logger');
 
 /**
- * Login de técnicos
+ * Login de técnicos - Genera JWT en login exitoso
  */
-exports.loginTecnico = (req, res) => {
+exports.loginTecnico = async (req, res) => {
   const { username, password } = req.body;
   
-  if (validarTecnico(username, password)) {
-    return res.json({ success: true });
+  try {
+    const esValido = await validarTecnico(username, password);
+    
+    if (esValido) {
+      // Obtener datos del técnico para incluir en el token
+      const tecnico = buscarTecnico(username);
+      
+      // Generar JWT con datos del técnico
+      const token = jwt.sign(
+        { 
+          username: tecnico.username,
+          role: 'tecnico',
+          // Incluir otros campos útiles si existen
+          ...(tecnico.nombre && { nombre: tecnico.nombre }),
+          ...(tecnico.email && { email: tecnico.email })
+        }, 
+        process.env.JWT_SECRETO, 
+        { expiresIn: '8h' }
+      );
+      
+      logger.info(`[authController] Login exitoso para técnico: ${username}`);
+      
+      return res.json({ 
+        success: true, 
+        token,
+        tecnico: {
+          username: tecnico.username,
+          ...(tecnico.nombre && { nombre: tecnico.nombre })
+        }
+      });
+    }
+    
+    logger.warn(`[authController] Login fallido para técnico: ${username}`);
+    return res.status(401).json({ 
+      success: false, 
+      message: 'Credenciales inválidas' 
+    });
+  } catch (error) {
+    logger.error(`[authController] Error en login de técnico: ${error.message}`);
+    return res.status(500).json({
+      success: false,
+      message: 'Error interno del servidor'
+    });
   }
-  
-  return res.status(401).json({ 
-    success: false, 
-    message: 'Credenciales inválidas' 
-  });
 };
 
 /**
