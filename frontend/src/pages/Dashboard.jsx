@@ -1619,7 +1619,11 @@ export default function Dashboard({ onLogout }) {
   }, [summaryData?.accessPoints, apDataSource]);
 
   // Cargar datos completos de APs con LLDP/CDP cuando se selecciona access_points
+  // Se dispara cuando: cambia la red, cambia la sección, o cuando el summary indica que hay APs
+  const hasAccessPointsInSummary = Array.isArray(summaryData?.accessPoints) && summaryData.accessPoints.length > 0;
+  
   useEffect(() => {
+    // Esperar a que tengamos network ID y que la sección sea access_points
     if (!selectedNetwork?.id) return;
     if (section !== 'access_points') return;
     
@@ -1628,6 +1632,7 @@ export default function Dashboard({ onLogout }) {
       return;
     }
 
+    // Iniciar carga LLDP
     const controller = new AbortController();
 
     const fetchEnrichedAPs = async () => {
@@ -1657,7 +1662,7 @@ export default function Dashboard({ onLogout }) {
     fetchEnrichedAPs();
 
     return () => controller.abort();
-  }, [selectedNetwork?.id, section]);
+  }, [selectedNetwork?.id, section, hasAccessPointsInSummary]); // Re-trigger cuando summary confirma que hay APs
 
   // Carga lazy de una sección específica
   const loadSection = useCallback(async (sectionKey, { force = false } = {}) => {
