@@ -16,6 +16,13 @@ fi
 
 cd "$PROJECT_DIR"
 
+# Verificar espacio en disco (necesitamos al menos 500MB)
+AVAILABLE_SPACE=$(df -m "$PROJECT_DIR" | awk 'NR==2 {print $4}')
+if [ "$AVAILABLE_SPACE" -lt 500 ]; then
+    echo "WARNING: Espacio en disco bajo ($AVAILABLE_SPACE MB disponibles)"
+    echo "Se recomiendan al menos 500MB para la actualización"
+fi
+
 # Backup del commit actual antes de actualizar
 CURRENT_COMMIT=$(git rev-parse --short HEAD)
 echo "Commit actual: $CURRENT_COMMIT"
@@ -38,22 +45,38 @@ fi
 
 echo "Actualizando de $CURRENT_COMMIT a $(git rev-parse --short origin/main)..."
 
-# IMPORTANTE: Hacer backup de tecnicos.json antes de actualizar
-echo "Haciendo backup de tecnicos.json (credenciales de técnicos)..."
+# IMPORTANTE: Hacer backup de archivos de datos antes de actualizar
+echo "Haciendo backup de archivos de datos..."
+
+# Backup de tecnicos.json (credenciales de técnicos)
 if [ -f "backend/data/tecnicos.json" ]; then
     cp backend/data/tecnicos.json /tmp/tecnicos.json.backup
-    echo "OK - Backup de tecnicos.json guardado"
+    echo "  OK - tecnicos.json guardado"
 else
-    echo "WARNING - tecnicos.json no encontrado (puede ser primera instalación)"
+    echo "  WARNING - tecnicos.json no encontrado (puede ser primera instalación)"
+fi
+
+# Backup de predios.csv (datos de predios)
+if [ -f "backend/data/predios.csv" ]; then
+    cp backend/data/predios.csv /tmp/predios.csv.backup
+    echo "  OK - predios.csv guardado"
+else
+    echo "  WARNING - predios.csv no encontrado"
 fi
 
 # Actualizar código desde GitHub
 git pull origin main
 
-# Restaurar tecnicos.json después de la actualización
+# Restaurar archivos de datos después de la actualización
+echo "Restaurando archivos de datos..."
 if [ -f "/tmp/tecnicos.json.backup" ]; then
     cp /tmp/tecnicos.json.backup backend/data/tecnicos.json
-    echo "OK - tecnicos.json restaurado"
+    echo "  OK - tecnicos.json restaurado"
+fi
+
+if [ -f "/tmp/predios.csv.backup" ]; then
+    cp /tmp/predios.csv.backup backend/data/predios.csv
+    echo "  OK - predios.csv restaurado"
 fi
 
 echo ""
@@ -135,6 +158,10 @@ echo ""
 echo "Commit aplicado: $(git rev-parse --short HEAD)"
 echo "Frontend: http://72.61.32.146 o https://portalmeraki.info"
 echo "Backend API: https://portalmeraki.info/api"
+echo ""
+echo "IMPORTANTE: Si no ves los cambios en el navegador:"
+echo "   - Presiona Ctrl+Shift+R para forzar recarga"
+echo "   - O borra caché del navegador"
 echo ""
 echo "Ver logs del backend:"
 echo "   pm2 logs portal-meraki-backend"
