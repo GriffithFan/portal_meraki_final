@@ -1,0 +1,20 @@
+# Portal Meraki - Configuración de despliegue en Railway
+# Este archivo configura cómo Railway construye y ejecuta el proyecto
+
+# Variables de entorno requeridas (configurar en Railway Dashboard):
+# - MERAKI_API_KEY: Tu API key de Meraki
+# - NODE_ENV: production
+# - JWT_SECRET: Secreto para tokens JWT (generar uno seguro)
+# - ADMIN_KEY: Clave de administrador
+
+[build]
+# Instalar dependencias solo del backend
+builder = "nixpacks"
+
+[deploy]
+# Iniciar el servidor desde el directorio backend
+startCommand = "cd backend && npm install --production && npm start"
+healthcheckPath = "/api/health"
+healthcheckTimeout = 30
+restartPolicyType = "on_failure"
+restartPolicyMaxRetries = 3

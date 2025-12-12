@@ -2635,6 +2635,30 @@ app.get('/api/predios/:code', (req, res) => {
   }
 });
 
+// ========== SERVIR FRONTEND ESTÁTICO (para Railway/producción) ==========
+// Servir archivos del frontend build si existe
+const frontendDistPath = path.join(__dirname, '..', '..', 'frontend', 'dist');
+const fs = require('fs');
+
+if (fs.existsSync(frontendDistPath)) {
+  // Servir archivos estáticos
+  app.use(express.static(frontendDistPath, {
+    maxAge: '1d',
+    etag: true
+  }));
+  
+  // SPA fallback: cualquier ruta no-API devuelve index.html
+  app.get('*', (req, res, next) => {
+    // No interceptar rutas de API
+    if (req.path.startsWith('/api')) {
+      return next();
+    }
+    res.sendFile(path.join(frontendDistPath, 'index.html'));
+  });
+  
+  logger.info(`Frontend estático habilitado desde: ${frontendDistPath}`);
+}
+
 // Manejadores de errores globales
 // Captura de errores no manejados
 process.on('uncaughtException', (error) => {
