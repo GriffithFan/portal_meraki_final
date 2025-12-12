@@ -23,10 +23,10 @@ export default defineConfig({
           // Solo cachear API externa de Meraki con timeout muy corto
           {
             urlPattern: /^https:\/\/api\.meraki\.com\/.*/i,
-            handler: 'NetworkOnly', // Cambiado de NetworkFirst a NetworkOnly
+            handler: 'NetworkOnly', // No cachear API de Meraki
             options: {
-              cacheName: 'meraki-api-cache',
-              networkTimeoutSeconds: 30
+              cacheName: 'meraki-api-cache'
+              // networkTimeoutSeconds removido - no compatible con NetworkOnly
             }
           }
           // ELIMINADO: Cache del backend - las APIs siempre deben ir a la red
