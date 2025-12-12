@@ -13,7 +13,7 @@ builder = "nixpacks"
 
 [deploy]
 # Iniciar el servidor desde el directorio backend
-startCommand = "cd backend && npm install --production && npm start"
+startCommand = "cd backend && npm start"
 healthcheckPath = "/api/health"
 healthcheckTimeout = 30
 restartPolicyType = "on_failure"
