@@ -8,7 +8,7 @@ nixPkgs = ["nodejs_20"]
 cmds = ["cd backend && npm install --omit=dev"]
 
 [phases.build]
-cmds = ["cd frontend && npm install && npm run build"]
+cmds = ["cd frontend && npm install && chmod +x node_modules/.bin/* && npm run build"]
 
 [start]
 cmd = "cd backend && npm start"
