@@ -64,6 +64,12 @@ const fileFormat = winston.format.combine(
 // Directorio de logs
 const logsDir = path.join(__dirname, '../../logs');
 
+// Crear directorio de logs si no existe
+const fs = require('fs');
+if (!fs.existsSync(logsDir)) {
+  fs.mkdirSync(logsDir, { recursive: true });
+}
+
 // Transport para todos los logs (rotación diaria)
 const allLogsTransport = new DailyRotateFile({
   filename: path.join(logsDir, 'application-%DATE%.log'),
