@@ -59,7 +59,7 @@ const getRequired = (key) => {
 // ============================================
 const server = {
   nodeEnv: get('NODE_ENV', 'development'),
-  port: getNumber('PUERTO', 3000),
+  port: getNumber('PORT', getNumber('PUERTO', 3000)), // PORT (Railway) o PUERTO (legacy)
   host: get('HOST', '0.0.0.0'),
   trustProxyHops: getNumber('TRUST_PROXY_HOPS', 1),
   isProduction: get('NODE_ENV') === 'production',
